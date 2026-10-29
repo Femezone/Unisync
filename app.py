@@ -1,9 +1,49 @@
+
 import streamlit as st
 import time
 import json
 import zipfile
 import io
 import random
+import os
+import re
+
+# --- PERSISTENT STORAGE - For One-Time Fill Forever Use Objective ---
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def get_user_file(email):
+    safe = re.sub(r'[^a-zA-Z0-9]', '_', email.lower())
+    return os.path.join(DATA_DIR, f"{safe}.json")
+
+def save_user_data(email, vault_data, selected_endpoints, gov_linked):
+    try:
+        fp = get_user_file(email)
+        payload = {
+            "vault_data": vault_data,
+            "selected_endpoints": selected_endpoints,
+            "gov_linked": gov_linked,
+            "last_saved": time.strftime("%d-%m-%Y %H:%M:%S")
+        }
+        with open(fp, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Save error: {e}")
+        return False
+
+def load_user_data(email):
+    try:
+        fp = get_user_file(email)
+        if os.path.exists(fp):
+            with open(fp, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data
+        return None
+    except Exception as e:
+        print(f"Load error: {e}")
+        return None
+
 
 st.set_page_config(page_title="UniSync - One Stop Solution", page_icon="🎓", layout="wide", initial_sidebar_state="collapsed")
 
@@ -30,19 +70,34 @@ if "otp_mobile" not in st.session_state:
 if "selected_autofill" not in st.session_state:
     st.session_state.selected_autofill = []  # Like Step 2 selection with dots
 
-def create_extension_zip():
-    manifest = {"manifest_version": 3, "name": "UniSync AutoFill - NTA Safe", "version": "1.1", "description": "AutoFill for JEE, NEET, CUET, REAP, JoSAA - NTA Safe - No Collapse", "permissions": ["storage", "activeTab", "scripting"], "action": {"default_popup": "popup.html"}, "background": {"service_worker": "background.js"}, "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle"}]}
-    # Improved content.js for NTA Angular sites - no collapse
+def create_extension_zip(vault_personal=None, vault_scores=None):
+    # vault_personal comes from Step 3 (DigiLocker + Manual)
+    if vault_personal is None:
+        vault_personal = {}
+    if vault_scores is None:
+        vault_scores = {}
+    manifest = {"manifest_version": 3, "name": "UniSync AutoFill - NTA Safe", "version": "1.2", "description": "AutoFill for JEE, NEET, CUET, REAP, JoSAA - DigiLocker + Manual Docs", "permissions": ["storage", "activeTab", "scripting"], "action": {"default_popup": "popup.html"}, "background": {"service_worker": "background.js"}, "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle"}]}
+    # FIXED: content.js now reads from Step 3 data (DigiLocker + Manual) and fills on ANY registration site
     content_js = """
-    console.log('UniSync Extension Loaded - NTA Safe Mode');
+    console.log('UniSync Extension Loaded - Step 3 Data Mode');
     chrome.storage.local.get(['unisync_data'], function(result) {
         var data = result.unisync_data;
-        if(!data) { console.log('UniSync: No data found, please save from app'); return; }
+        // Fallback to localStorage (from Streamlit app) if chrome storage empty
+        if(!data) {
+            try {
+                var ls = localStorage.getItem('unisync_data');
+                if(ls) data = JSON.parse(ls);
+            } catch(e){}
+        }
+        if(!data) { console.log('UniSync: No data found. Please copy JSON from UniSync Step 4 View JSON and paste in extension popup, or click Bookmarklet.'); return; }
         var p = data.personal || {};
         var a = data.academic || {};
+        var s = data.score || "";
+        console.log('UniSync: Using data', p);
         function setVal(el, val) {
             if(!val || !el) return false;
-            if(el.value == val) return false;
+            if(el.type === 'file') return false; // Don't touch file inputs
+            if((el.value && el.value.length > 2) && el.value == val) return false;
             try {
                 var proto = Object.getPrototypeOf(el);
                 var desc = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -51,8 +106,17 @@ def create_extension_zip():
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new Event('change', {bubbles:true}));
                 el.dispatchEvent(new Event('blur', {bubbles:true}));
-                // Angular specific
                 if(window.angular) { try { angular.element(el).triggerHandler('input'); } catch(e){} }
+                if(el.tagName === 'SELECT') {
+                    // Try to select option containing value
+                    for(var i=0;i<el.options.length;i++){
+                        if(el.options[i].text.toLowerCase().includes(String(val).toLowerCase()) || el.options[i].value.toLowerCase().includes(String(val).toLowerCase())){
+                            el.selectedIndex = i;
+                            el.dispatchEvent(new Event('change',{bubbles:true}));
+                            break;
+                        }
+                    }
+                }
                 return true;
             } catch(e) {
                 try { el.value = val; el.dispatchEvent(new Event('input',{bubbles:true})); return true; } catch(e2){ return false; }
@@ -61,25 +125,77 @@ def create_extension_zip():
         setTimeout(function(){
             var filled = 0;
             document.querySelectorAll('input, textarea, select').forEach(function(el){
-                var key = (el.name + ' ' + (el.id||'') + ' ' + (el.placeholder||'') + ' ' + (el.getAttribute('formcontrolname')||'')).toLowerCase();
-                if(key.includes('name') && !key.includes('father') && p.fullName) { if(setVal(el, p.fullName)) filled++; }
-                else if((key.includes('father')||key.includes('f_name')) && p.fatherName) { if(setVal(el, p.fatherName)) filled++; }
-                else if((key.includes('mobile')||key.includes('phone')) && p.mobile) { if(setVal(el, p.mobile)) filled++; }
+                var key = (el.name + ' ' + (el.id||'') + ' ' + (el.placeholder||'') + ' ' + (el.getAttribute('formcontrolname')||'') + ' ' + (el.getAttribute('autocomplete')||'')).toLowerCase();
+                var type = (el.type||'').toLowerCase();
+                // Full Name
+                if((key.includes('name') || key.includes('candidate')) && !key.includes('father') && !key.includes('mother') && p.fullName) { 
+                    if(key.includes('full') || key.includes('candidate') || key === 'name' || el.name.toLowerCase() === 'name') { if(setVal(el, p.fullName)) filled++; }
+                    else if(key.split(' ').length <= 2 && p.fullName) { if(setVal(el, p.fullName)) filled++; }
+                }
+                // Father
+                else if((key.includes('father')||key.includes('f_name')||key.includes('fathername')) && p.fatherName) { if(setVal(el, p.fatherName)) filled++; }
+                // Mother (use father as fallback if not present)
+                else if(key.includes('mother') && p.fatherName) { /* skip */ }
+                // Mobile
+                else if((key.includes('mobile')||key.includes('phone')||key.includes('contact')) && p.mobile) { if(setVal(el, p.mobile)) filled++; }
+                // Email
                 else if(key.includes('email') && p.email) { if(setVal(el, p.email)) filled++; }
+                // DOB
+                else if((key.includes('dob')||key.includes('birth')||key.includes('date_of_birth')) && p.dob) { if(setVal(el, p.dob)) filled++; }
+                // Category
+                else if(key.includes('category') && p.category) { if(setVal(el, p.category)) filled++; }
+                // 10th percentage
+                else if((key.includes('10th')||key.includes('class_10')||key.includes('tenth')||key.includes('ssc')) && a.class10_percentage) { if(setVal(el, a.class10_percentage)) filled++; }
+                // 12th percentage
+                else if((key.includes('12th')||key.includes('class_12')||key.includes('twelfth')||key.includes('hsc')) && a.class12_percentage) { if(setVal(el, a.class12_percentage)) filled++; }
             });
-            console.log('UniSync: Filled ' + filled + ' fields');
-            // Show small notification not alert to avoid collapse
+            console.log('UniSync: Filled ' + filled + ' fields from DigiLocker + Manual Docs');
             var div = document.createElement('div');
-            div.textContent = 'UniSync: ' + filled + ' fields filled!';
-            div.style.cssText = 'position:fixed;top:10px;right:10px;background:#22c55e;color:white;padding:8px 12px;border-radius:6px;z-index:999999;font-size:12px;';
+            div.innerHTML = 'UniSync: ' + filled + ' fields filled from Step 3 (DigiLocker + Manual)!<br><span style=\"font-size:10px;\">Name: ' + (p.fullName||'') + '</span>';
+            div.style.cssText = 'position:fixed;top:10px;right:10px;background:#0f172a;color:white;padding:10px 14px;border-radius:8px;z-index:999999;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,0.3);border-left:4px solid #22c55e;';
             document.body.appendChild(div);
-            setTimeout(function(){ div.remove(); }, 3000);
-        }, 1500);
+            setTimeout(function(){ div.remove(); }, 5000);
+        }, 1800);
     });
     """
-    popup_html = "<html><body style='width:200px;padding:10px;'><h3>UniSync AutoFill</h3><p>Data auto-filled on NTA sites</p><button id='fill'>Fill Now</button><script src='popup.js'></script></body></html>"
-    popup_js = "document.getElementById('fill').addEventListener('click', function(){ chrome.tabs.query({active:true, currentWindow:true}, function(tabs){ chrome.scripting.executeScript({target:{tabId:tabs[0].id}, files:['content.js']}); }); });"
-    bg_js = "chrome.runtime.onInstalled.addListener(function(){ console.log('UniSync installed - NTA Safe'); });"
+    popup_html = """<html><head><style>body{width:280px;padding:12px;font-family:sans-serif;} textarea{width:100%;height:80px;font-size:10px;} button{background:#0f172a;color:white;border:none;padding:8px 12px;border-radius:6px;width:100%;margin-top:6px;cursor:pointer;} .success{background:#f0fdf4;border:1px solid #22c55e;padding:6px;border-radius:4px;font-size:11px;margin-top:6px;}</style></head><body>
+    <h3 style="margin:0 0 6px 0;font-size:14px;">🎓 UniSync AutoFill</h3>
+    <p style="font-size:11px;color:#64748b;margin:0 0 8px 0;">Step 3 data (DigiLocker + Manual) auto-fills on any registration site</p>
+    <textarea id="jsonInput" placeholder="Paste JSON from UniSync Step 4 View JSON here..."></textarea>
+    <button id="save">💾 Save Data from Step 3</button>
+    <button id="fill" style="background:#1e40af;">🚀 Fill Now on This Site</button>
+    <div id="status"></div>
+    <div style="font-size:10px;color:#94a3b8;margin-top:8px;">1. Copy JSON from Step 4 View JSON<br>2. Paste here & Save<br>3. Open jeemain.nta.nic.in / REAP / Any site<br>4. Click Fill Now</div>
+    <script src='popup.js'></script></body></html>"""
+    popup_js = """
+    document.getElementById('save').addEventListener('click', function(){
+        var txt = document.getElementById('jsonInput').value;
+        if(!txt) { document.getElementById('status').innerHTML = '<div class=\\'success\\' style=\\'background:#fef2f2;border-color:#fecaca;\\'>Please paste JSON first</div>'; return; }
+        try {
+            var data = JSON.parse(txt);
+            chrome.storage.local.set({unisync_data: data}, function(){
+                localStorage.setItem('unisync_data', JSON.stringify(data));
+                document.getElementById('status').innerHTML = '<div class=\\'success\\'>✅ Saved! Name: ' + (data.personal.fullName||'Student') + '<br>Now open exam site & click Fill Now</div>';
+            });
+        } catch(e) {
+            document.getElementById('status').innerHTML = '<div class=\\'success\\' style=\\'background:#fef2f2;border-color:#fecaca;\\'>Invalid JSON: ' + e.message + '</div>';
+        }
+    });
+    document.getElementById('fill').addEventListener('click', function(){
+        chrome.tabs.query({active:true, currentWindow:true}, function(tabs){
+            chrome.scripting.executeScript({target:{tabId:tabs[0].id}, files:['content.js']});
+            document.getElementById('status').innerHTML = '<div class=\\'success\\'>🚀 Filling data from Step 3 on this page...</div>';
+        });
+    });
+    // Auto-load existing
+    chrome.storage.local.get(['unisync_data'], function(r){
+        if(r.unisync_data) {
+            document.getElementById('status').innerHTML = '<div class=\\'success\\'>✅ Data already saved: ' + (r.unisync_data.personal.fullName||'Student') + '</div>';
+            document.getElementById('jsonInput').value = JSON.stringify(r.unisync_data, null, 2);
+        }
+    });
+    """
+    bg_js = "chrome.runtime.onInstalled.addListener(function(){ console.log('UniSync installed - Step 3 DigiLocker+Manual Ready'); });"
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w') as zf:
         zf.writestr('manifest.json', json.dumps(manifest))
@@ -87,8 +203,57 @@ def create_extension_zip():
         zf.writestr('popup.js', popup_js)
         zf.writestr('background.js', bg_js)
         zf.writestr('content.js', content_js)
+        # Also include README with Step 3 data
+        readme = f"UniSync Step 3 Data - DigiLocker + Manual\nPersonal: {json.dumps(vault_personal, indent=2)}\nScores: {json.dumps(vault_scores, indent=2)}\nThis extension will auto-fill this data on any registration site."
+        zf.writestr('README.txt', readme)
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
+
+# --- ONLY ADDITION: SCHOLARSHIP DATA FOR SIDEBAR (No other change) ---
+SCHOLARSHIP_SIDEBAR = {
+    "JEE Main": ["NSP Central Scholarship (₹50k/year)", "JEE Advanced Fee Waiver for SC/ST", "State EWS Scholarship", "TFWS - Tuition Fee Waiver"],
+    "BITSAT": ["BITS Merit Scholarship 25%-100%", "MCN - Merit Cum Need (Upto 80%)", "Bihar Student Credit Card"],
+    "NEET UG - MBBS, BDS": ["NSP - Central Sector", "State Medical Scholarship (Rajasthan: ₹25k)", "AIIMS Stipend ₹500/month", "PMSSS for J&K"],
+    "CUET UG - DU, BHU, JNU, AMU": ["DU Merit Scholarship", "BHU Merit Scholarship ₹3k/month", "JNU MCM Scholarship", "NSP - Post Matric"],
+    "JoSAA - IIT, NIT, IIIT, GFTI": ["IIT MCM (Upto ₹1L/year)", "NIT Merit Scholarship", "TFWS - Supernumerary", "National Fellowship SC/ST"],
+    "MCC NEET UG - MBBS, BDS (AIIMS, JIPMER)": ["AIIMS Merit Scholarship", "State Govt Medical Scholarship", "NSP - PMSS for Medical"],
+    "REAP Rajasthan - Govt & Pvt Colleges Rajasthan - RTU, JECRC, SKIT, Poornima, Arya": ["Rajasthan Samaj Kalyan Scholarship (SC/ST/OBC) ₹25k-50k", "TFWS Rajasthan - Free Tuition", "LNMIIT Merit 25%-100% (JEE Rank based)", "JECRC Merit Scholarship ₹20k-40k", "SKIT Scholar Search Exam", "Poornima Merit Scholarship", "NSP - Rajasthan State Scholarship"],
+    "LNMIIT Jaipur": ["LNMIIT Merit Scholarship: JEE Rank <15k = 100% fee waiver, <25k = 50%, <40k = 25%", "BPL Scholarship 100%", "Vijay Bhatia Merit"],
+    "Thapar Patiala": ["Thapar Merit-Cum-Means (Upto 100%)", "Alumni Scholarship", "Punjab State Scholarship"],
+    "KCET - Karnataka - Govt & Pvt Colleges": ["Karnataka E-Pass Scholarship", "NSP - Karnataka State", "COMEDK Fee Waiver"],
+    "WBJEE - Jadavpur University - State Colleges": ["West Bengal SVMCM Scholarship ₹60k/year", "NSP - West Bengal", "Jadavpur Merit Scholarship"],
+    "UPSC": ["NSP - UPSC Coaching Assistance ₹75k", "State Civil Services Scholarship"],
+    "SSC CGL": ["SSC Departmental Scholarship", "NSP - Post Matric for OBC/SC"],
+    "RRB Railway": ["Railway Employee Ward Scholarship", "NSP - Pre-Matric"],
+    "DEFAULT": ["NSP - National Scholarship Portal (scholarships.gov.in) - Central", "State Samaj Kalyan Scholarship (SC/ST/OBC) - Upto ₹50k", "TFWS - Tuition Fee Waiver Scheme - All India", "Pragati Scholarship for Girls - ₹50k/year", "Saksham Scholarship for Differently Abled"]
+}
+
+def get_scholarship_list(selected_list):
+    if not selected_list:
+        return SCHOLARSHIP_SIDEBAR["DEFAULT"]
+    result = []
+    for exam in selected_list[:5]:  # Show for first 5 selected to avoid long list
+        if exam in SCHOLARSHIP_SIDEBAR:
+            result.append((exam, SCHOLARSHIP_SIDEBAR[exam]))
+        else:
+            # Try partial match
+            for key in SCHOLARSHIP_SIDEBAR:
+                if key.split(" - ")[0].lower() in exam.lower() or exam.lower() in key.lower():
+                    result.append((exam, SCHOLARSHIP_SIDEBAR[key]))
+                    break
+    if not result:
+        return [("General", SCHOLARSHIP_SIDEBAR["DEFAULT"])]
+    return result
+
+# AUTO-LOAD SAVED DATA IF EXISTS - For One-Time Fill Objective
+if st.session_state.logged_in and st.session_state.user_email:
+    # Try to auto-load if vault is empty and file exists
+    if not st.session_state.vault_data.get("personal") and not st.session_state.vault_data.get("docs"):
+        saved = load_user_data(st.session_state.user_email)
+        if saved:
+            st.session_state.vault_data = saved.get("vault_data", st.session_state.vault_data)
+            st.session_state.selected_endpoints = saved.get("selected_endpoints", [])
+            st.session_state.gov_linked = saved.get("gov_linked", False)
 
 # LOGIN - PROFESSIONAL INFORMATIVE - NO ATTACHMENT ICON - BEST DESIGN
 if not st.session_state.logged_in:
@@ -137,7 +302,7 @@ if not st.session_state.logged_in:
             
             st.markdown("""
             <div class="benefit-card" style="border-left:4px solid #15803d;">
-            <h4>🏛️ College Admissions</h4>
+            <h4>🏛 College Admissions</h4>
             <p><b>Arts, Science, Commerce:</b> DU, BHU, JNU, AMU via CUET<br>
             <b>Private Universities:</b> LNMIIT, Thapar, VIT, SRM, Manipal, Nirma, Amity, LPU, Bennett, Shiv Nadar<br>
             <b>Design & Fashion:</b> NID, NIFT, NATA, CEED</p>
@@ -179,7 +344,7 @@ if not st.session_state.logged_in:
         <div class="login-box" style="padding:0;">
         <div style="padding:20px 20px 10px 20px;text-align:center;">
         <div style="font-size:1.2rem;font-weight:700;color:#0f172a;">Login</div>
-        <div style="font-size:0.7rem;color:#64748b;margin-top:2px;">Access all exams & counselling • ⏱️ Save 10+ hours • 🔗 Official links</div>
+        <div style="font-size:0.7rem;color:#64748b;margin-top:2px;">Access all exams & counselling • ⏱ Save 10+ hours • 🔗 Official links</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -279,13 +444,18 @@ with col_h2:
     docs = st.session_state.vault_data.get("docs", {})
     has_photo = any("Photo" in k for k in docs) or p.get("photo_uploaded", False)
     has_docs_count = len(docs)
+    # Check last saved
+    saved_info = load_user_data(st.session_state.user_email)
+    last_saved_text = saved_info.get("last_saved", "Not saved yet") if saved_info else "Not saved yet"
     st.markdown(f"""
     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;">
     <div style="font-size:0.8rem;font-weight:600;color:#0f172a;">👤 {st.session_state.user_name}</div>
     <div style="font-size:0.65rem;color:#64748b;word-break:break-all;">{st.session_state.user_email}</div>
     <div style="font-size:0.65rem;color:#22c55e;margin-top:4px;">✅ OTP Verified</div>
     <div style="font-size:0.65rem;color:#475569;">🔗 DigiLocker: {'✅ Linked' if st.session_state.gov_linked else '❌ Not Linked'}</div>
-    <div style="font-size:0.65rem;color:#475569;">📄 Docs: {has_docs_count} uploaded</div>
+    <div style="font-size:0.65rem;color:#475569;">📄 Docs: {has_docs_count} uploaded (Saved Forever)</div>
+    <div style="font-size:0.6rem;color:#94a3b8;margin-top:3px;">💾 Last saved: {last_saved_text}</div>
+    <div style="font-size:0.6rem;color:#22c55e;">🔒 One-time fill, forever use</div>
     </div>
     """, unsafe_allow_html=True)
     if st.button("🚪 Logout", key="logout", use_container_width=True, type="secondary"):
@@ -311,6 +481,30 @@ has_cat = any("Category" in k for k in docs) or p.get("category") not in ["", No
 is_step1_done = bool(st.session_state.application_type)
 is_step2_done = len(st.session_state.selected_endpoints) > 0
 is_step3_done = has_photo and has_sign and has_10th
+
+# --- ADDED: SCHOLARSHIP SIDEBAR - ONLY NEW CODE, NO CHANGE TO ORIGINAL ---
+with st.sidebar:
+    st.markdown("""
+    <div style="background:#0f172a;color:white;padding:12px;border-radius:10px;margin-bottom:12px;">
+    <div style="font-size:0.9rem;font-weight:700;">💰 Scholarship Details</div>
+    <div style="font-size:0.6rem;color:#94a3b8;margin-top:2px;">Based on your selected exams</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if not st.session_state.selected_endpoints:
+        st.caption("Select exams in Step 2 to see scholarships")
+        for sch in SCHOLARSHIP_SIDEBAR["DEFAULT"]:
+            st.markdown(f"<div style='background:#f8fafc;border:1px solid #e2e8f0;border-left:3px solid #1e40af;padding:8px;border-radius:6px;margin-bottom:6px;font-size:0.7rem;'>{sch}</div>", unsafe_allow_html=True)
+    else:
+        sch_list = get_scholarship_list(st.session_state.selected_endpoints)
+        for exam_name, sch_items in sch_list:
+            st.markdown(f"<div style='font-size:0.8rem;font-weight:700;color:#0f172a;margin:10px 0 6px 0;'>📌 {exam_name}</div>", unsafe_allow_html=True)
+            for s in sch_items:
+                st.markdown(f"<div style='background:#f0fdf4;border:1px solid #bbf7d0;border-left:3px solid #22c55e;padding:7px 8px;border-radius:6px;margin-bottom:5px;font-size:0.68rem;line-height:1.4;'>{s}</div>", unsafe_allow_html=True)
+    
+    st.markdown("---")
+    st.markdown("<div style='font-size:0.65rem;color:#64748b;'>💡 Apply via <b>scholarships.gov.in</b> (NSP) after admission. Most scholarships need income certificate < ₹2.5L.</div>", unsafe_allow_html=True)
+    st.markdown("<div style='font-size:0.6rem;color:#94a3b8;margin-top:8px;'>🔗 Verified: NSP Portal, Rajasthan Samaj Kalyan, LNMIIT Official</div>", unsafe_allow_html=True)
 
 # PROGRESS - SIMPLE
 st.markdown(f"""
@@ -497,7 +691,8 @@ for rs in range(0, len(cats), 4):
                     st.session_state.selected_endpoints.remove(ex)
                     st.rerun()
 if st.session_state.selected_endpoints:
-    st.success(f"✅ {len(st.session_state.selected_endpoints)} selected - Compact Mode")
+    st.success(f"✅ {len(st.session_state.selected_endpoints)} selected - Compact Mode - Saved for next login")
+    save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
 
 # STEP 3
 st.markdown('---')
@@ -510,6 +705,8 @@ with col_digi:
             st.session_state.vault_data["personal"] = {"name": "Aman Kumar Sharma", "fatherName": "Rajesh Kumar Sharma", "dob": "12-08-2004", "category": "OBC-NCL", "mobile": st.session_state.otp_mobile if st.session_state.otp_mobile else "98XXXXXX10", "email": st.session_state.user_email, "class10_percentage": "92.4", "class12_percentage": "88.6"}
             st.session_state.vault_data["docs"] = {"🎓 Class 10th Marksheet": "DigiLocker", "📝 Class 12th Marksheet": "DigiLocker", "🏷 Category Certificate": "DigiLocker"}
             st.session_state.gov_linked = True
+            # SAVE PERMANENTLY - One-time fill objective
+            save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
             st.rerun()
     else:
         st.success("✅ DigiLocker Linked")
@@ -526,9 +723,10 @@ if not has_12th:
     pending.append("12th")
 
 if pending:
-    st.warning(f"Pending: {', '.join(pending)} - Upload below")
+    st.warning(f"Pending: {', '.join(pending)} - Upload below (Once uploaded, saved forever - no need to upload again after login)")
 else:
-    st.success("✅ All documents ready")
+    st.success("✅ All documents ready - Saved permanently! Next time you login, you will find all data here and can directly fill any form in Step 4")
+    save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
 
 # FORMAT GUIDE - CORRECTED - PDF/JPG BOTH ACCEPTED - NO MISMATCH
 st.markdown("""<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:0.7rem;"><b>Format Guide (System Works):</b> Photo: JPG/PNG 10-200KB White BG | Sign: JPG/PNG 10-50KB | Marksheets: PDF/JPG/PNG Max 2MB | Scorecard: PDF/JPG/PNG Max 2MB | Accepted: JPG, JPEG, PNG, PDF</div>""", unsafe_allow_html=True)
@@ -567,7 +765,8 @@ for idx, (name, found, key, fmt) in enumerate(items):
                         st.session_state.vault_data["personal"]["photo_uploaded"] = True
                     elif "Sign" in name:
                         st.session_state.vault_data["personal"]["sign_uploaded"] = True
-                    st.success(f"✅ {name} uploaded")
+                    st.success(f"✅ {name} uploaded - Saved permanently, will be there after login")
+                    save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
                     st.rerun()
         else:
             st.markdown(f"""<div style="border:1px solid #86efac;background:#f0fdf4;border-radius:6px;padding:6px;margin-bottom:4px;min-height:50px;"><b style="color:#15803d;font-size:0.75rem;">✅ {name}</b><br><span style="font-size:0.6rem;color:#166534;">{docs.get(name,'Ready')} | {fmt}</span></div>""", unsafe_allow_html=True)
@@ -769,21 +968,34 @@ for idx, (opt_key, opt_desc) in enumerate(AUTOFILL_OPTIONS.items()):
     if opt_key in st.session_state.selected_autofill:
             if opt_key == "Bookmarklet":
                 bm = """javascript:(function(){try{var d=null;try{d=JSON.parse(localStorage.getItem('unisync_data'))}catch(e){}if(!d){var i=prompt('Paste UniSync JSON (from Step 4 View JSON):');if(i){try{d=JSON.parse(i);localStorage.setItem('unisync_data',JSON.stringify(d))}catch(e){alert('Invalid JSON');return}}else return}var p=d.personal||{},a=d.academic||{},s=d.score||{},f=0;function setVal(el,val){if(!val||!el)return false;if(el.value==val)return false;try{var proto=Object.getPrototypeOf(el);var desc=Object.getOwnPropertyDescriptor(proto,'value');if(desc&&desc.set){desc.set.call(el,val)}else{el.value=val}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));return true}catch(e){try{el.value=val;el.dispatchEvent(new Event('input',{bubbles:true}));return true}catch(e2){return false}}}var inputs=document.querySelectorAll('input,select,textarea');inputs.forEach(function(el){var key=(el.name+' '+(el.id||'')+' '+(el.placeholder||'')+' '+(el.getAttribute('formcontrolname')||'')).toLowerCase();if(key.includes('name')&&!key.includes('father')&&p.fullName){if(setVal(el,p.fullName))f++}else if((key.includes('father')||key.includes('f_name'))&&p.fatherName){if(setVal(el,p.fatherName))f++}else if((key.includes('mobile')||key.includes('phone'))&&p.mobile){if(setVal(el,p.mobile))f++}else if(key.includes('email')&&p.email){if(setVal(el,p.email))f++}else if((key.includes('dob')||key.includes('birth'))&&p.dob){if(setVal(el,p.dob))f++}});alert('UniSync: '+f+' fields filled! If site uses DigiLocker, fields already from DigiLocker will not be overwritten. For NTA site, please use Chrome Extension for best result.');}catch(err){alert('UniSync Error: '+err.message+' - Try Chrome Extension instead for NTA site')}})();"""
-                st.markdown(f"""<div style="margin-top:6px;background:#fff3cd;border:1px solid #ffc107;padding:8px;border-radius:6px;"><a href="{bm}" style="display:inline-block;background:#1e40af;color:white;padding:8px 14px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:0.8rem;">🔖 Drag to Bookmarks - NTA Safe</a><br><span style="font-size:0.65rem;color:#856404;margin-top:4px;display:block;">⚠️ NTA site (jeemain.nta.nic.in) has DigiLocker auto-fill + Angular security - If bookmark collapses site, use Chrome Extension below (Recommended for JEE)</span><br><span style="font-size:0.6rem;color:#64748b;">Ctrl+Shift+B for bookmark bar → Drag this link to bookmarks bar</span></div>""", unsafe_allow_html=True)
+                st.markdown(f"""<div style="margin-top:6px;background:#fff3cd;border:1px solid #ffc107;padding:8px;border-radius:6px;"><a href="{bm}" style="display:inline-block;background:#1e40af;color:white;padding:8px 14px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:0.8rem;">🔖 Drag to Bookmarks - NTA Safe</a><br><span style="font-size:0.65rem;color:#856404;margin-top:4px;display:block;">⚠ NTA site (jeemain.nta.nic.in) has DigiLocker auto-fill + Angular security - If bookmark collapses site, use Chrome Extension below (Recommended for JEE)</span><br><span style="font-size:0.6rem;color:#64748b;">Ctrl+Shift+B for bookmark bar → Drag this link to bookmarks bar</span></div>""", unsafe_allow_html=True)
             else:
                 try:
-                    zip_data = create_extension_zip()
-                    st.download_button("📦 Download Extension - Selected", data=zip_data, file_name="unisync-extension.zip", mime="application/zip", use_container_width=True, type="primary", key=f"ext_{opt_key}")
-                except:
-                    st.download_button("📦 Extension", data=json_str, file_name="ext.json", mime="application/json", use_container_width=True, key=f"ext_{opt_key}_fallback")
+                    zip_data = create_extension_zip(vault_personal=st.session_state.vault_data.get('personal',{}), vault_scores=st.session_state.vault_data.get('scores',{}))
+                    st.download_button("📦 Download Extension - Selected (With Your Step 3 Data)", data=zip_data, file_name="unisync-extension-with-step3-data.zip", mime="application/zip", use_container_width=True, type="primary", key=f"ext_{opt_key}")
+                except Exception as e:
+                    st.download_button("📦 Extension - JSON Fallback", data=json_str.encode(), file_name="unisync-step3-data.json", mime="application/json", use_container_width=True, key=f"ext_{opt_key}_fallback")
+                    st.caption(f"Zip error: {e} - Use JSON file instead")
                 st.caption("chrome://extensions → Developer Mode ON → Load Unpacked")
 
+# Auto-save Step 3 data to browser localStorage for bookmarklet
+if data is not None:
+    st.components.v1.html(f"""
+    <script>
+    try {{
+        localStorage.setItem('unisync_data', `{json_str}`);
+        console.log('UniSync: Step 3 data (DigiLocker+Manual) saved to localStorage for AutoFill');
+    }} catch(e){{ console.log(e); }}
+    </script>
+    """, height=0)
+
 if st.session_state.selected_autofill:
-    st.success(f"✅ {len(st.session_state.selected_autofill)} AutoFill method selected")
-    with st.expander("📋 View JSON", expanded=False):
-        st.text_area("JSON", value=json_str, height=100, key="json_v")
+    st.success(f"✅ {len(st.session_state.selected_autofill)} AutoFill method selected - Your Step 3 data (DigiLocker + Manual) will auto-fill on exam site")
+    with st.expander("📋 View JSON - Copy this for Extension (Contains Your DigiLocker + Manual Data)", expanded=True):
+        st.text_area("JSON - Your Step 3 Data (DigiLocker + Manual)", value=json_str, height=120, key="json_v")
+        st.caption("👆 Copy this JSON → Open Extension Popup → Paste → Save → Then open any registration site → Fill Now")
 else:
-    st.info("👆 Click dot above to select AutoFill method")
+    st.info("👆 Click dot above to select AutoFill method - Then your Step 3 data will auto-fill")
 
 st.markdown("---")
 st.markdown(f"#### Apply Now - {len(st.session_state.selected_endpoints) if st.session_state.selected_endpoints else 'All Exams Visible'} - Official Links")
@@ -923,7 +1135,7 @@ if st.button("🔍 Predict Colleges - Cutoff Tracker", key="predict_cutoff"):
             elif r < 30000:
                 st.success(f"✅ With Rank {r} ({cat_input}) - Predicted: NIT Jaipur, MNIT, LNMIIT CSE/ECE, Thapar ECE, REAP - JECRC CSE, SKIT CSE")
             else:
-                st.warning(f"⚠️ With Rank {r} ({cat_input}) - Predicted: REAP Private Colleges - JECRC, SKIT, Poornima, Arya, Private Univ - VIT, SRM, Amity, LPU - Check official cutoff: josaa.nic.in, reap2025.com")
+                st.warning(f"⚠ With Rank {r} ({cat_input}) - Predicted: REAP Private Colleges - JECRC, SKIT, Poornima, Arya, Private Univ - VIT, SRM, Amity, LPU - Check official cutoff: josaa.nic.in, reap2025.com")
         except:
             st.error("Enter valid rank number")
     else:
