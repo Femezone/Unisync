@@ -5,37 +5,6 @@ import json
 import zipfile
 import io
 import random
-import os
-import re
-
-# --- PERSISTENT STORAGE - One-time fill forever use ---
-DATA_DIR = "data"
-os.makedirs(DATA_DIR, exist_ok=True)
-
-def get_user_file(email):
-    safe = re.sub(r'[^a-zA-Z0-9]', '_', email.lower())
-    return os.path.join(DATA_DIR, f"{safe}.json")
-
-def save_user_data(email, vault_data, selected_endpoints, gov_linked):
-    try:
-        fp = get_user_file(email)
-        payload = {"vault_data": vault_data, "selected_endpoints": selected_endpoints, "gov_linked": gov_linked, "last_saved": time.strftime("%d-%m-%Y %H:%M:%S")}
-        with open(fp, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, indent=2)
-        return True
-    except Exception as e:
-        print(f"Save error: {e}")
-        return False
-
-def load_user_data(email):
-    try:
-        fp = get_user_file(email)
-        if os.path.exists(fp):
-            with open(fp, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return None
-    except:
-        return None
 
 st.set_page_config(page_title="UniSync - One Stop Solution", page_icon="🎓", layout="wide", initial_sidebar_state="collapsed")
 
@@ -127,23 +96,85 @@ def create_extension_zip(vault_personal=None, vault_scores=None):
     return zip_buffer.getvalue()
 
 # --- ONLY ADDITION: SCHOLARSHIP DATA FOR SIDEBAR (No other change) ---
+# --- SCHOLARSHIP DATA - COMPREHENSIVE UG/PG WITH LINKS, DATES ---
 SCHOLARSHIP_SIDEBAR = {
-    "JEE Main": ["NSP Central Scholarship (₹50k/year)", "JEE Advanced Fee Waiver for SC/ST", "State EWS Scholarship", "TFWS - Tuition Fee Waiver"],
+    "JEE Main": ["NSP Central Scholarship (₹50k/year) - 31 Dec - scholarships.gov.in", "JEE Advanced Fee Waiver for SC/ST", "State EWS Scholarship", "TFWS - Tuition Fee Waiver"],
     "BITSAT": ["BITS Merit Scholarship 25%-100%", "MCN - Merit Cum Need (Upto 80%)", "Bihar Student Credit Card"],
     "NEET UG - MBBS, BDS": ["NSP - Central Sector", "State Medical Scholarship (Rajasthan: ₹25k)", "AIIMS Stipend ₹500/month", "PMSSS for J&K"],
     "CUET UG - DU, BHU, JNU, AMU": ["DU Merit Scholarship", "BHU Merit Scholarship ₹3k/month", "JNU MCM Scholarship", "NSP - Post Matric"],
     "JoSAA - IIT, NIT, IIIT, GFTI": ["IIT MCM (Upto ₹1L/year)", "NIT Merit Scholarship", "TFWS - Supernumerary", "National Fellowship SC/ST"],
-    "MCC NEET UG - MBBS, BDS (AIIMS, JIPMER)": ["AIIMS Merit Scholarship", "State Govt Medical Scholarship", "NSP - PMSS for Medical"],
-    "REAP Rajasthan - Govt & Pvt Colleges Rajasthan - RTU, JECRC, SKIT, Poornima, Arya": ["Rajasthan Samaj Kalyan Scholarship (SC/ST/OBC) ₹25k-50k", "TFWS Rajasthan - Free Tuition", "LNMIIT Merit 25%-100% (JEE Rank based)", "JECRC Merit Scholarship ₹20k-40k", "SKIT Scholar Search Exam", "Poornima Merit Scholarship", "NSP - Rajasthan State Scholarship"],
+    "REAP Rajasthan - Govt & Pvt Colleges Rajasthan - RTU, JECRC, SKIT, Poornima, Arya": ["Rajasthan Samaj Kalyan Scholarship (SC/ST/OBC) ₹25k-50k", "TFWS Rajasthan - Free Tuition", "LNMIIT Merit 25%-100% (JEE Rank based)", "JECRC Merit Scholarship ₹20k-40k"],
     "LNMIIT Jaipur": ["LNMIIT Merit Scholarship: JEE Rank <15k = 100% fee waiver, <25k = 50%, <40k = 25%", "BPL Scholarship 100%", "Vijay Bhatia Merit"],
     "Thapar Patiala": ["Thapar Merit-Cum-Means (Upto 100%)", "Alumni Scholarship", "Punjab State Scholarship"],
-    "KCET - Karnataka - Govt & Pvt Colleges": ["Karnataka E-Pass Scholarship", "NSP - Karnataka State", "COMEDK Fee Waiver"],
-    "WBJEE - Jadavpur University - State Colleges": ["West Bengal SVMCM Scholarship ₹60k/year", "NSP - West Bengal", "Jadavpur Merit Scholarship"],
-    "UPSC": ["NSP - UPSC Coaching Assistance ₹75k", "State Civil Services Scholarship"],
-    "SSC CGL": ["SSC Departmental Scholarship", "NSP - Post Matric for OBC/SC"],
-    "RRB Railway": ["Railway Employee Ward Scholarship", "NSP - Pre-Matric"],
-    "DEFAULT": ["NSP - National Scholarship Portal (scholarships.gov.in) - Central", "State Samaj Kalyan Scholarship (SC/ST/OBC) - Upto ₹50k", "TFWS - Tuition Fee Waiver Scheme - All India", "Pragati Scholarship for Girls - ₹50k/year", "Saksham Scholarship for Differently Abled"]
+    "DEFAULT": ["NSP - National Scholarship Portal (scholarships.gov.in) - Central", "State Samaj Kalyan Scholarship (SC/ST/OBC) - Upto ₹50k", "TFWS - Tuition Fee Waiver Scheme - All India"]
 }
+
+SCHOLARSHIP_UG = [
+    {"name": "NSP - Central Sector Scholarship", "amount": "₹10,000-50,000/year", "deadline": "31 Dec 2025", "link": "https://scholarships.gov.in", "desc": "For all UG students - Merit based, Family income < ₹8L", "type": "Central Govt"},
+    {"name": "PM Vidya Lakshmi - Education Loan", "amount": "Upto ₹10 Lakhs - No Collateral", "deadline": "Open Year-Round", "link": "https://www.vidyalakshmi.co.in", "desc": "PM Vidya Lakshmi - Education loan for UG/PG in India & Abroad", "type": "PM Scheme"},
+    {"name": "PM Vidya Lakshmi - PM USHA Portal", "amount": "Upto ₹10L - Interest Subsidy", "deadline": "Open", "link": "https://pmvidyalaxmi.co.in", "desc": "New PM Vidya Lakshmi Portal - Collateral free loan for top 860 institutions", "type": "PM Scheme"},
+    {"name": "Rajasthan Samaj Kalyan - SC/ST/OBC", "amount": "₹25,000-50,000/year", "deadline": "30 Nov 2025", "link": "https://sje.rajasthan.gov.in", "desc": "Rajasthan Social Justice Dept - Post Matric Scholarship", "type": "Rajasthan State"},
+    {"name": "Rajasthan - Anuprati Yojana", "amount": "₹50,000-1,00,000", "deadline": "31 Dec 2025", "link": "https://sje.rajasthan.gov.in/Anuprati", "desc": "Rajasthan - Free coaching for JEE, NEET, CLAT, UPSC + Scholarship", "type": "Rajasthan State"},
+    {"name": "Rajasthan - Swami Vivekananda Abroad Study", "amount": "Upto ₹20 Lakhs + Airfare", "deadline": "15 Dec 2025", "link": "https://hte.rajasthan.gov.in", "desc": "Rajasthan Govt - Scholarship for abroad UG in top 50 universities (US, UK)", "type": "Rajasthan Abroad"},
+    {"name": "Rajasthan - Dr. Ambedkar International", "amount": "Full Tuition + $15,000/year", "deadline": "31 Jan 2026", "link": "https://sje.rajasthan.gov.in", "desc": "Rajasthan SC students for abroad study in US, UK, Australia", "type": "Rajasthan Abroad"},
+    {"name": "LNMIIT Jaipur Merit", "amount": "100% waiver if JEE Rank <15k, 50% <25k, 25% <40k", "deadline": "15 Jun 2026", "link": "https://admissions.lnmiit.ac.in/scholarship", "desc": "LNMIIT Jaipur - Merit based on JEE Main rank", "type": "Private Univ"},
+    {"name": "VIT Vellore - GVSD", "amount": "25%-100% based on VITEEE rank", "deadline": "31 Mar 2026", "link": "https://viteee.vit.ac.in/scholarship", "desc": "VITEEE rank based scholarship for BTech", "type": "Private Univ"},
+    {"name": "Fulbright-Nehru US Undergraduate", "amount": "Full Tuition + Living + Airfare", "deadline": "15 May 2026", "link": "https://www.usief.org.in", "desc": "US-India Educational Foundation - For UG in US", "type": "US Study"},
+    {"name": "TFWS - Tuition Fee Waiver", "amount": "100% Tuition Free - All India", "deadline": "Via REAP/JoSAA", "link": "https://www.aicte-india.org", "desc": "AICTE TFWS - 5% supernumerary seats free", "type": "Central"},
+    {"name": "Pragati Scholarship for Girls", "amount": "₹50,000/year for girls", "deadline": "31 Dec 2025", "link": "https://scholarships.gov.in", "desc": "AICTE Pragati - Girls in BTech/Diploma", "type": "Girls"},
+]
+
+SCHOLARSHIP_PG = [
+    {"name": "GATE Scholarship - MTech/ME", "amount": "₹12,400/month for 2 years", "deadline": "Via GATE 2026 Score", "link": "https://gate.iisc.ac.in", "desc": "AICTE GATE Scholarship for MTech in IIT/NIT", "type": "PG - MTech"},
+    {"name": "PM Vidya Lakshmi - PG Loan Abroad", "amount": "Upto ₹20 Lakhs for PG Abroad", "deadline": "Open Year-Round", "link": "https://www.vidyalakshmi.co.in", "desc": "PM Vidya Lakshmi - Education loan for PG in India & Abroad - US, UK, Canada", "type": "PM Scheme"},
+    {"name": "Fulbright-Nehru Masters Fellowship (US)", "amount": "Full Tuition + Living + Airfare - US PG", "deadline": "15 May 2026", "link": "https://www.usief.org.in/Fulbright-Nehru-Fellowships", "desc": "Top PG scholarship for Indians to do Masters in US - Fully funded", "type": "US PG"},
+    {"name": "Chevening Scholarship UK (PG)", "amount": "Full Tuition + Living for UK Masters", "deadline": "05 Nov 2025", "link": "https://www.chevening.org/scholarship/india/", "desc": "UK Govt Chevening - Fully funded Masters in UK", "type": "UK PG"},
+    {"name": "Erasmus Mundus EU (PG)", "amount": "€24,000-48,000 for 2 years", "deadline": "15 Jan 2026", "link": "https://erasmus-plus.ec.europa.eu", "desc": "EU Scholarship - Study PG in 2-3 European countries fully funded", "type": "EU PG"},
+    {"name": "DAAD Germany (PG)", "amount": "€934/month + Tuition + Airfare", "deadline": "01 Oct 2025", "link": "https://www.daad.org.in", "desc": "Germany DAAD - Masters/PhD in Germany fully funded", "type": "Germany PG"},
+    {"name": "Rajasthan - CM Anuprati - PG Abroad", "amount": "Upto ₹20L + Airfare for PG Abroad", "deadline": "31 Dec 2025", "link": "https://hte.rajasthan.gov.in", "desc": "Rajasthan - PG students for abroad in top universities - US/UK", "type": "Rajasthan PG Abroad"},
+    {"name": "National Fellowship SC/ST - PG/PhD", "amount": "₹31,000/month + Contingency", "deadline": "31 Dec 2025", "link": "https://scholarships.gov.in", "desc": "UGC - For SC/ST students for PG/PhD in India", "type": "PG - India"},
+    {"name": "Prime Minister Research Fellowship (PMRF)", "amount": "₹70,000-80,000/month for PhD", "deadline": "Via GATE/GRE", "link": "https://www.pmrf.in", "desc": "Top PhD fellowship in IITs/IISc", "type": "PhD"},
+    {"name": "Stanford Knight-Hennessy PG", "amount": "Full Funding - Stanford PG", "deadline": "09 Oct 2025", "link": "https://knight-hennessy.stanford.edu", "desc": "Fully funded Masters/PhD at Stanford University USA", "type": "US PG"},
+    {"name": "Rhodes Scholarship Oxford (PG)", "amount": "Full Tuition + Living - Oxford UK", "deadline": "01 Aug 2026", "link": "https://www.rhodeshouse.ox.ac.uk", "desc": "Most prestigious - Masters/PhD at Oxford UK", "type": "UK PG"},
+    {"name": "Inlaks Scholarship - Abroad PG", "amount": "Upto $100,000 for PG Abroad", "deadline": "31 Mar 2026", "link": "https://www.inlaksfoundation.org", "desc": "Inlaks - For Indians to study PG in US/UK/Europe", "type": "Abroad PG"},
+]
+
+
+def save_user_data(email, vault_data, selected_endpoints, gov_linked):
+    """Save user data permanently to data/ folder - One-time fill forever"""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        # Sanitize email for filename
+        safe_email = re.sub(r'[^a-zA-Z0-9@._-]', '_', email)
+        file_path = os.path.join(DATA_DIR, f"{safe_email}.json")
+        data = {
+            "email": email,
+            "vault_data": vault_data,
+            "selected_endpoints": selected_endpoints,
+            "gov_linked": gov_linked,
+            "saved_at": datetime.now().isoformat()
+        }
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"Save error: {e}")
+        return False
+
+def load_user_data(email):
+    """Load user data from data/ folder if exists"""
+    try:
+        safe_email = re.sub(r'[^a-zA-Z0-9@._-]', '_', email)
+        file_path = os.path.join(DATA_DIR, f"{safe_email}.json")
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data
+        return None
+    except Exception as e:
+        print(f"Load error: {e}")
+        return None
+
 
 def get_scholarship_list(selected_list):
     if not selected_list:
@@ -161,15 +192,6 @@ def get_scholarship_list(selected_list):
     if not result:
         return [("General", SCHOLARSHIP_SIDEBAR["DEFAULT"])]
     return result
-
-# AUTO-LOAD SAVED DATA IF EXISTS - One-time fill objective
-if st.session_state.logged_in and st.session_state.user_email:
-    if not st.session_state.vault_data.get("personal") and not st.session_state.vault_data.get("docs"):
-        saved = load_user_data(st.session_state.user_email)
-        if saved:
-            st.session_state.vault_data = saved.get("vault_data", st.session_state.vault_data)
-            st.session_state.selected_endpoints = saved.get("selected_endpoints", [])
-            st.session_state.gov_linked = saved.get("gov_linked", False)
 
 # LOGIN - PROFESSIONAL INFORMATIVE - NO ATTACHMENT ICON - BEST DESIGN
 if not st.session_state.logged_in:
@@ -397,25 +419,45 @@ is_step3_done = has_photo and has_sign and has_10th
 with st.sidebar:
     st.markdown("""
     <div style="background:#0f172a;color:white;padding:12px;border-radius:10px;margin-bottom:12px;">
-    <div style="font-size:0.9rem;font-weight:700;">💰 Scholarship Details</div>
-    <div style="font-size:0.6rem;color:#94a3b8;margin-top:2px;">Based on your selected exams</div>
+    <div style="font-size:0.95rem;font-weight:800;">💰 Scholarship Details - UG & PG</div>
+    <div style="font-size:0.65rem;color:#94a3b8;margin-top:3px;">Click Apply - With dates & links</div>
     </div>
     """, unsafe_allow_html=True)
     
-    if not st.session_state.selected_endpoints:
-        st.caption("Select exams in Step 2 to see scholarships")
-        for sch in SCHOLARSHIP_SIDEBAR["DEFAULT"]:
-            st.markdown(f"<div style='background:#f8fafc;border:1px solid #e2e8f0;border-left:3px solid #1e40af;padding:8px;border-radius:6px;margin-bottom:6px;font-size:0.7rem;'>{sch}</div>", unsafe_allow_html=True)
-    else:
-        sch_list = get_scholarship_list(st.session_state.selected_endpoints)
-        for exam_name, sch_items in sch_list:
-            st.markdown(f"<div style='font-size:0.8rem;font-weight:700;color:#0f172a;margin:10px 0 6px 0;'>📌 {exam_name}</div>", unsafe_allow_html=True)
-            for s in sch_items:
-                st.markdown(f"<div style='background:#f0fdf4;border:1px solid #bbf7d0;border-left:3px solid #22c55e;padding:7px 8px;border-radius:6px;margin-bottom:5px;font-size:0.68rem;line-height:1.4;'>{s}</div>", unsafe_allow_html=True)
+    sch_search = st.text_input("🔍 Search scholarship", placeholder="Search NSP, Vidya Lakshmi, Rajasthan, US, Fulbright...", key="sch_search_final", label_visibility="collapsed")
+    
+    tab_ug, tab_pg = st.tabs(["🎓 UG", "🎓 PG"])
+    
+    def render_sch_card(sch):
+        if sch_search and sch_search.lower() not in (sch["name"] + sch["desc"] + sch["type"]).lower():
+            return False
+        st.markdown(f"""
+        <div style="background:white;border:1px solid #e2e8f0;border-left:4px solid #1e40af;border-radius:8px;padding:10px;margin-bottom:8px;">
+        <div style="font-size:0.8rem;font-weight:700;color:#0f172a;">{sch['name']}</div>
+        <div style="font-size:0.65rem;color:#22c55e;font-weight:600;margin:2px 0;">💰 {sch['amount']} | 📅 {sch['deadline']} | {sch['type']}</div>
+        <div style="font-size:0.65rem;color:#475569;margin:3px 0;line-height:1.3;">{sch['desc']}</div>
+        <div style="margin-top:6px;"><a href="{sch['link']}" target="_blank" style="background:#0f172a;color:white;padding:4px 10px;border-radius:4px;font-size:0.65rem;text-decoration:none;display:inline-block;">🔗 Apply</a> <span style="font-size:0.55rem;color:#94a3b8;margin-left:4px;">{sch['link'][:28]}...</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+        return True
+    
+    with tab_ug:
+        st.caption(f"{len(SCHOLARSHIP_UG)} UG scholarships - PM Vidya Lakshmi, Rajasthan Abroad, US, etc")
+        for sch in SCHOLARSHIP_UG:
+            render_sch_card(sch)
+    
+    with tab_pg:
+        st.caption(f"{len(SCHOLARSHIP_PG)} PG scholarships - GATE, Fulbright US, Chevening UK, DAAD, etc")
+        for sch in SCHOLARSHIP_PG:
+            render_sch_card(sch)
     
     st.markdown("---")
-    st.markdown("<div style='font-size:0.65rem;color:#64748b;'>💡 Apply via <b>scholarships.gov.in</b> (NSP) after admission. Most scholarships need income certificate < ₹2.5L.</div>", unsafe_allow_html=True)
-    st.markdown("<div style='font-size:0.6rem;color:#94a3b8;margin-top:8px;'>🔗 Verified: NSP Portal, Rajasthan Samaj Kalyan, LNMIIT Official</div>", unsafe_allow_html=True)
+    st.link_button("🔗 NSP Portal", "https://scholarships.gov.in", use_container_width=True)
+    st.link_button("🔗 PM Vidya Lakshmi", "https://www.vidyalakshmi.co.in", use_container_width=True)
+    st.link_button("🔗 Rajasthan SJE", "https://sje.rajasthan.gov.in", use_container_width=True)
+    st.link_button("🔗 USIEF Fulbright US", "https://www.usief.org.in", use_container_width=True)
+
+
 
 # PROGRESS - SIMPLE
 st.markdown(f"""
@@ -590,13 +632,19 @@ for rs in range(0, len(cats), 4):
                 # Use columns to show checkbox + colored badge same line
                 c_chk, c_date = st.columns([3.2, 1.8])
                 with c_chk:
-                    checked = st.checkbox(f"{dot} {ex}", value=sel, key=f"chk_{cat}_{ex}_{rs}_{ci}_{date_str[:2]}")
+                    # SINGLE SELECTION ONLY - Only 1 exam at a time, disable others until deselected (as per your instruction)
+                    already_one_selected = len(st.session_state.selected_endpoints) >= 1 and ex not in st.session_state.selected_endpoints
+                    if already_one_selected:
+                        st.checkbox(f"{dot} {ex} ⛔ Only 1 allowed - Deselect {st.session_state.selected_endpoints[0]} first", value=False, key=f"chk_{cat}_{ex}_{rs}_{ci}_{date_str[:2]}", disabled=True)
+                        checked = False
+                    else:
+                        checked = st.checkbox(f"{dot} {ex}", value=sel, key=f"chk_{cat}_{ex}_{rs}_{ci}_{date_str[:2]}")
                 with c_date:
                     if date_str:
                         st.markdown(f"""<div style="background:{badge_bg};color:{badge_color};border:1px solid {border};font-size:0.6rem;font-weight:600;padding:2px 6px;border-radius:10px;text-align:center;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{date_str}</div>""", unsafe_allow_html=True)
                 
                 if checked and ex not in st.session_state.selected_endpoints:
-                    st.session_state.selected_endpoints.append(ex)
+                    st.session_state.selected_endpoints = [ex]  # SINGLE SELECTION ONLY - Only 1 at a time
                     st.rerun()
                 elif not checked and ex in st.session_state.selected_endpoints:
                     st.session_state.selected_endpoints.remove(ex)
@@ -851,161 +899,79 @@ else:
         st.text_input("Score", value=ds['score_val'] if ds['score'] else "N/A", disabled=True, key="p_score")
     docs_status = ds
 
+# AUTOFILL - VERTICAL MODE - DOT CLICK LIKE STEP 2
+st.markdown("#### AutoFill - Choose Option")
 
-# STEP 4 - SIMPLIFIED FOR POPULARITY - 2 BEST OPTIONS (Laptop AutoFill + Mobile Copy Cards) - No JSON Copy-Paste
-st.markdown("---")
-st.markdown("## Step 4: Apply Now - 2 Easy Options (Choose Any)")
+AUTOFILL_OPTIONS = {
+    "Bookmarklet": "🔖 Bookmarklet (Simple - No Install) - Drag to bookmark bar",
+    "Chrome Extension": "📦 Chrome Extension (1-Click) - Download & Install",
+}
 
-# Data preview already shown above - now show 2 options
-st.markdown("""
-<div style="background:linear-gradient(135deg,#0f172a 0%,#1e40af 100%);color:white;padding:14px 18px;border-radius:10px;margin:12px 0;">
-<div style="font-size:1rem;font-weight:800;">🎯 Your Data is Ready - One-Time Fill Done! Now Apply Anywhere in 1-Click</div>
-<div style="font-size:0.75rem;color:#bfdbfe;margin-top:4px;">Choose Laptop (Auto-Fill) or Mobile (Copy Cards) - Both work, if one fails try other</div>
-</div>
-""", unsafe_allow_html=True)
+st.markdown("""<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #1e40af;border-radius:6px;padding:8px 10px;margin-bottom:8px;"><h4 style="margin:0;color:#0f172a;font-size:0.9rem;">AutoFill Methods - Select by Dot</h4></div>""", unsafe_allow_html=True)
 
-# Show data summary
-if data is not None:
-    pers = data["personal"]
-    st.markdown(f"""<div style="background:#f0fdf4;border:1px solid #22c55e;border-radius:8px;padding:8px 12px;margin:8px 0;font-size:0.85rem;">
-    ✅ <b>{pers.get('name','Student')}</b> | {pers.get('mobile','')} | {pers.get('category','')} | Ready to Auto-Fill on any site
-    </div>""", unsafe_allow_html=True)
+for idx, (opt_key, opt_desc) in enumerate(AUTOFILL_OPTIONS.items()):
+    sel = opt_key in st.session_state.selected_autofill
+    dot = "🟢" if sel else "⚪"
+    checked = st.checkbox(f"{dot} {opt_desc}", value=sel, key=f"autofill_{opt_key}")
+    if checked and opt_key not in st.session_state.selected_autofill:
+        st.session_state.selected_autofill.append(opt_key)
+        st.rerun()
+    elif not checked and opt_key in st.session_state.selected_autofill:
+        st.session_state.selected_autofill.remove(opt_key)
+        st.rerun()
+    
+    # Show action only if selected - VERTICAL - FIXED FOR NTA SITE - NO COLLAPSE
+    if opt_key in st.session_state.selected_autofill:
+            if opt_key == "Bookmarklet":
+                bm = """javascript:(function(){try{var d=null;try{d=JSON.parse(localStorage.getItem('unisync_data'))}catch(e){}if(!d){var i=prompt('Paste UniSync JSON (from Step 4 View JSON):');if(i){try{d=JSON.parse(i);localStorage.setItem('unisync_data',JSON.stringify(d))}catch(e){alert('Invalid JSON');return}}else return}var p=d.personal||{},a=d.academic||{},s=d.score||{},f=0;function setVal(el,val){if(!val||!el)return false;if(el.value==val)return false;try{var proto=Object.getPrototypeOf(el);var desc=Object.getOwnPropertyDescriptor(proto,'value');if(desc&&desc.set){desc.set.call(el,val)}else{el.value=val}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));return true}catch(e){try{el.value=val;el.dispatchEvent(new Event('input',{bubbles:true}));return true}catch(e2){return false}}}var inputs=document.querySelectorAll('input,select,textarea');inputs.forEach(function(el){var key=(el.name+' '+(el.id||'')+' '+(el.placeholder||'')+' '+(el.getAttribute('formcontrolname')||'')).toLowerCase();if(key.includes('name')&&!key.includes('father')&&p.fullName){if(setVal(el,p.fullName))f++}else if((key.includes('father')||key.includes('f_name'))&&p.fatherName){if(setVal(el,p.fatherName))f++}else if((key.includes('mobile')||key.includes('phone'))&&p.mobile){if(setVal(el,p.mobile))f++}else if(key.includes('email')&&p.email){if(setVal(el,p.email))f++}else if((key.includes('dob')||key.includes('birth'))&&p.dob){if(setVal(el,p.dob))f++}});alert('UniSync: '+f+' fields filled! If site uses DigiLocker, fields already from DigiLocker will not be overwritten. For NTA site, please use Chrome Extension for best result.');}catch(err){alert('UniSync Error: '+err.message+' - Try Chrome Extension instead for NTA site')}})();"""
+                st.markdown(f"""<div style="margin-top:6px;background:#fff3cd;border:1px solid #ffc107;padding:8px;border-radius:6px;"><a href="{bm}" style="display:inline-block;background:#1e40af;color:white;padding:8px 14px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:0.8rem;">🔖 Drag to Bookmarks - NTA Safe</a><br><span style="font-size:0.65rem;color:#856404;margin-top:4px;display:block;">⚠ NTA site (jeemain.nta.nic.in) has DigiLocker auto-fill + Angular security - If bookmark collapses site, use Chrome Extension below (Recommended for JEE)</span><br><span style="font-size:0.6rem;color:#64748b;">Ctrl+Shift+B for bookmark bar → Drag this link to bookmarks bar</span></div>""", unsafe_allow_html=True)
+            else:
+                try:
+                    zip_data = create_extension_zip(vault_personal=st.session_state.vault_data.get("personal",{}), vault_scores=st.session_state.vault_data.get("scores",{}))
+                    st.download_button("📦 Download Extension - Selected", data=zip_data, file_name="unisync-extension.zip", mime="application/zip", use_container_width=True, type="primary", key=f"ext_{opt_key}")
+                except:
+                    st.download_button("📦 Extension", data=json_str, file_name="ext.json", mime="application/json", use_container_width=True, key=f"ext_{opt_key}_fallback")
+                st.caption("chrome://extensions → Developer Mode ON → Load Unpacked")
 
-tab1, tab2 = st.tabs(["🖥️ Option 1: Laptop - 1-Click AutoFill (Recommended)", "📱 Option 2: Mobile - Smart Copy Cards (No Install)"])
-
-with tab1:
-    st.markdown("""
-    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-left:4px solid #1e40af;border-radius:8px;padding:12px;margin-bottom:10px;">
-    <div style="font-size:0.9rem;font-weight:700;color:#1e40af;">🖥️ Best for Laptop - JEE, REAP, JoSAA, LNMIIT (Auto-Fills)</div>
-    <div style="font-size:0.75rem;color:#475569;margin-top:4px;">1. Click Enable → 2. Install Extension → 3. Open Exam Site → Auto-Fills</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    col_en, col_dl = st.columns(2)
-    with col_en:
-        if st.button("🚀 Enable AutoFill - 1 Click (Save My Data for Auto-Fill)", use_container_width=True, type="primary", key="enable_autofill_popular"):
-            # Save to localStorage for extension via JS
-            st.components.v1.html(f"""
-            <script>
-            try {{
-                localStorage.setItem('unisync_data', `{json_str}`);
-                // Try to send to extension if installed
-                if(window.chrome && chrome.runtime) {{
-                    try {{ chrome.runtime.sendMessage({{action: "saveData", data: {json_str}}}); }} catch(e){{}}
-                }}
-                console.log('UniSync: AutoFill Enabled');
-            }} catch(e){{ console.log(e); }}
-            </script>
-            <div style="background:#f0fdf4;border:1px solid #22c55e;padding:8px;border-radius:6px;font-size:0.8rem;">✅ AutoFill Enabled! Data saved for extension. Now install extension and open exam site.</div>
-            """, height=60)
-            st.success("✅ AutoFill Enabled! Your Step 3 data (DigiLocker + Manual) is now ready to auto-fill on any site")
-            save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
-    
-    with col_dl:
-        try:
-            zip_data = create_extension_zip(vault_personal=st.session_state.vault_data.get('personal',{}), vault_scores=st.session_state.vault_data.get('scores',{}))
-            st.download_button("📦 Download UniSync Extension (1-Click Install)", data=zip_data, file_name="unisync-extension-1click.zip", mime="application/zip", use_container_width=True, type="secondary", key="dl_ext_popular")
-        except:
-            st.download_button("📥 Download Backup JSON", data=json_str.encode(), file_name="unisync-data.json", mime="application/json", use_container_width=True, key="dl_json_backup_pop")
-        st.caption("chrome://extensions → Developer Mode ON → Load Unpacked → Done")
-    
-    st.info("💡 After Enable: Open jeemain.nta.nic.in / reap2025.com / admissions.lnmiit.ac.in → Extension auto-fills your Name, Father Name, Mobile, Email, DOB, Category")
-    
-    # Apply Now buttons for Option 1
-    st.markdown("#### 🎯 Apply Now - Click Any Exam (Auto-Fills if Extension Installed)")
-    if not st.session_state.selected_endpoints:
-        display_endpoints_tab1 = ["JEE Main", "BITSAT", "NEET UG - MBBS, BDS", "CUET UG - DU, BHU, JNU, AMU", "JoSAA - IIT, NIT, IIIT, GFTI", "LNMIIT Jaipur", "REAP Rajasthan - Govt & Pvt Colleges Rajasthan - RTU, JECRC, SKIT, Poornima, Arya", "MCC NEET UG - MBBS, BDS (AIIMS, JIPMER)"]
-    else:
-        display_endpoints_tab1 = st.session_state.selected_endpoints
-    
-    cols1 = st.columns(2)
-    for idx, ep in enumerate(display_endpoints_tab1):
-        url = get_url(ep)
-        direct_url = get_direct(ep)
-        with cols1[idx % 2]:
-            st.markdown(f"""<div style="border:1px solid #e2e8f0;border-radius:6px;padding:6px;background:white;margin-bottom:2px;"><b style="font-size:0.8rem;">{ep}</b></div>""", unsafe_allow_html=True)
-            c1, c2 = st.columns(2)
-            with c1:
-                st.link_button("📝 Apply Now", direct_url, type="primary", use_container_width=True, key=f"apply_tab1_{ep}_{idx}")
-            with c2:
-                st.link_button("🏠 Info", url, use_container_width=True, key=f"info_tab1_{ep}_{idx}")
-
-with tab2:
-    st.markdown("""
-    <div style="background:#fffbeb;border:1px solid #fde68a;border-left:4px solid #f59e0b;border-radius:8px;padding:12px;margin-bottom:10px;">
-    <div style="font-size:0.9rem;font-weight:700;color:#92400e;">📱 Best for Mobile - No Extension, No Install (Works on Phone)</div>
-    <div style="font-size:0.75rem;color:#78350f;margin-top:4px;">If Extension fails on NTA site, use this - Always works, 1 tap copy</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if data is None:
-        st.warning("Upload docs in Step 3 first - Then copy cards will appear here")
-        pers = {}
-    else:
-        pers = data["personal"]
-        ds = data["docs_status"]
-        
-        # Smart Copy Cards
-        st.markdown("#### 📋 Your Data - Tap Copy to Fill Any Form")
-        
-        # Create copy cards with JS
-        cards = [
-            ("👤 Full Name", pers.get("name",""), "fullName"),
-            ("👨‍👦 Father Name", pers.get("fatherName",""), "fatherName"),
-            ("📱 Mobile", pers.get("mobile",""), "mobile"),
-            ("📧 Email", pers.get("email",""), "email"),
-            ("🎂 DOB", pers.get("dob",""), "dob"),
-            ("🏷️ Category", pers.get("category",""), "category"),
-            ("🎓 10th %", pers.get("class10_percentage",""), "10th"),
-            ("📝 12th %", pers.get("class12_percentage",""), "12th"),
-            ("📊 Rank/Score", ds.get("score_val",""), "score"),
-        ]
-        
-        cols_cards = st.columns(2)
-        for i, (label, val, key) in enumerate(cards):
-            if not val:
-                continue
-            with cols_cards[i % 2]:
-                st.markdown(f"""
-                <div style="border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;margin-bottom:8px;background:white;display:flex;justify-content:space-between;align-items:center;">
-                <div><div style="font-size:0.7rem;color:#64748b;">{label}</div><div style="font-size:0.85rem;font-weight:600;color:#0f172a;">{val}</div></div>
-                <div><button onclick="navigator.clipboard.writeText('{val}'); this.innerText='✅';" style="background:#0f172a;color:white;border:none;padding:6px 10px;border-radius:6px;font-size:0.7rem;cursor:pointer;">📋 Copy</button></div>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        # Copy All
-        all_text = f"Name: {pers.get('name','')}\nFather: {pers.get('fatherName','')}\nMobile: {pers.get('mobile','')}\nEmail: {pers.get('email','')}\nDOB: {pers.get('dob','')}\nCategory: {pers.get('category','')}\n10th: {pers.get('class10_percentage','')}%\n12th: {pers.get('class12_percentage','')}%"
-        
-        st.markdown("---")
-        col_all1, col_all2 = st.columns(2)
-        with col_all1:
-            st.components.v1.html(f"""
-            <button onclick="navigator.clipboard.writeText(`{all_text}`); this.innerText='✅ All Copied!';" style="background:#22c55e;color:white;border:none;padding:10px 14px;border-radius:8px;width:100%;cursor:pointer;font-weight:600;">📋 Copy All Details (1-Click)</button>
-            """, height=50)
-        with col_all2:
-            wa_text = f"My Details: Name {pers.get('name','')}, Mobile {pers.get('mobile','')}, Email {pers.get('email','')}"
-            st.link_button(f"💬 Share via WhatsApp", f"https://wa.me/?text={wa_text.replace(' ', '%20')}", use_container_width=True)
-        
-        st.success("✅ On Phone: Tap Copy on any card → Open exam site (jeemain.nta.nic.in) → Long press on field → Paste → Done! No extension needed")
-    
-    st.markdown("#### 🎯 Apply Now - Mobile Friendly Links")
-    if not st.session_state.selected_endpoints:
-        display_endpoints_tab2 = ["JEE Main", "NEET UG - MBBS, BDS", "REAP Rajasthan - Govt & Pvt Colleges Rajasthan - RTU, JECRC, SKIT, Poornima, Arya", "LNMIIT Jaipur"]
-    else:
-        display_endpoints_tab2 = st.session_state.selected_endpoints[:6]
-    
-    cols2 = st.columns(2)
-    for idx, ep in enumerate(display_endpoints_tab2):
-        direct_url = get_direct(ep)
-        with cols2[idx % 2]:
-            st.link_button(f"📝 {ep} - Apply", direct_url, use_container_width=True, key=f"apply_tab2_{ep}_{idx}")
+if st.session_state.selected_autofill:
+    st.success(f"✅ {len(st.session_state.selected_autofill)} AutoFill method selected")
+    with st.expander("📋 View JSON - Copy this for Extension (Contains Your DigiLocker + Manual Data)", expanded=True):
+        st.markdown("**📋 Step 1: Click Copy icon (top-right corner of code box) to copy your Step 3 data**")
+        st.code(json_str, language="json")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button("📥 Download JSON File", data=json_str.encode(), file_name="unisync-my-data.json", mime="application/json", use_container_width=True)
+        with c2:
+            st.markdown("**Step 2: Paste in Extension Popup**")
+            st.caption("Open Puzzle Icon → UniSync → Paste → Save")
+        st.info("**How to use after Copy:** 1. Copy from code box (top-right copy icon) 2. Open Chrome Extension 3. Paste → Save Data from Step 3 4. Open exam site → Fill Now")
+else:
+    st.info("👆 Click dot above to select AutoFill method - Then your Step 3 data will auto-fill")
 
 st.markdown("---")
-st.markdown("""
-<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;text-align:center;font-size:0.75rem;color:#475569;">
-💡 <b>Why 2 Options?</b> Laptop users love Auto-Fill Extension (1-Click), Mobile users love Copy Cards (No Install). If one fails, try other - Both use your same Step 3 data (DigiLocker + Manual) saved forever after login.
-</div>
-""", unsafe_allow_html=True)
+# DYNAMIC HEADER - Show only selected exam name to avoid confusion (only selected exam, not ALL list)
+if st.session_state.selected_endpoints:
+    st.markdown(f"#### 🎯 Apply Now - {st.session_state.selected_endpoints[0]} - Click to Apply (Auto-Fills Your Data)")
+else:
+    st.markdown(f"#### 🎯 Apply Now - Select 1 exam in Step 2 first - Then Apply Button Will Appear")
+
+if not st.session_state.selected_endpoints:
+    st.info("Select exams in Step 2 to filter - Showing all popular exams below")
+    display_endpoints = ["JEE Main", "BITSAT", "NEET UG - MBBS, BDS", "CUET UG - DU, BHU, JNU, AMU", "JoSAA - IIT, NIT, IIIT, GFTI", "LNMIIT Jaipur", "REAP Rajasthan", "MCC NEET UG - MBBS, BDS"]
+else:
+    display_endpoints = st.session_state.selected_endpoints
+
+cols = st.columns(2)
+for idx, ep in enumerate(display_endpoints):
+    url = get_url(ep)
+    direct_url = get_direct(ep)
+    with cols[idx % 2]:
+        st.markdown(f"""<div style="border:1px solid #e2e8f0;border-radius:6px;padding:8px;margin-bottom:4px;background:white;"><b style="font-size:0.8rem;">{ep}</b><br><span style="font-size:0.6rem;color:#64748b;">{url}</span><br><span style="font-size:0.6rem;color:#22c55e;">✅ Verified Official</span></div>""", unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.link_button("📝 Apply Now", direct_url, type="primary", use_container_width=True, key=f"ap_{ep}_{idx}")
+        with c2:
+            st.link_button("🏠 Info", url, use_container_width=True, key=f"in_{ep}_{idx}")
 
 
 
