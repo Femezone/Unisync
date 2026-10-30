@@ -8,7 +8,7 @@ import random
 import os
 import re
 
-# --- PERSISTENT STORAGE - For One-Time Fill Forever Use Objective ---
+# --- PERSISTENT STORAGE - One-time fill forever use ---
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -19,12 +19,7 @@ def get_user_file(email):
 def save_user_data(email, vault_data, selected_endpoints, gov_linked):
     try:
         fp = get_user_file(email)
-        payload = {
-            "vault_data": vault_data,
-            "selected_endpoints": selected_endpoints,
-            "gov_linked": gov_linked,
-            "last_saved": time.strftime("%d-%m-%Y %H:%M:%S")
-        }
+        payload = {"vault_data": vault_data, "selected_endpoints": selected_endpoints, "gov_linked": gov_linked, "last_saved": time.strftime("%d-%m-%Y %H:%M:%S")}
         with open(fp, 'w', encoding='utf-8') as f:
             json.dump(payload, f, indent=2)
         return True
@@ -37,13 +32,10 @@ def load_user_data(email):
         fp = get_user_file(email)
         if os.path.exists(fp):
             with open(fp, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return data
+                return json.load(f)
         return None
-    except Exception as e:
-        print(f"Load error: {e}")
+    except:
         return None
-
 
 st.set_page_config(page_title="UniSync - One Stop Solution", page_icon="🎓", layout="wide", initial_sidebar_state="collapsed")
 
@@ -71,33 +63,22 @@ if "selected_autofill" not in st.session_state:
     st.session_state.selected_autofill = []  # Like Step 2 selection with dots
 
 def create_extension_zip(vault_personal=None, vault_scores=None):
-    # vault_personal comes from Step 3 (DigiLocker + Manual)
     if vault_personal is None:
         vault_personal = {}
     if vault_scores is None:
         vault_scores = {}
-    manifest = {"manifest_version": 3, "name": "UniSync AutoFill - NTA Safe", "version": "1.2", "description": "AutoFill for JEE, NEET, CUET, REAP, JoSAA - DigiLocker + Manual Docs", "permissions": ["storage", "activeTab", "scripting"], "action": {"default_popup": "popup.html"}, "background": {"service_worker": "background.js"}, "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle"}]}
-    # FIXED: content.js now reads from Step 3 data (DigiLocker + Manual) and fills on ANY registration site
+    manifest = {"manifest_version": 3, "name": "UniSync AutoFill - NTA Safe", "version": "1.1", "description": "AutoFill for JEE, NEET, CUET, REAP, JoSAA - NTA Safe - No Collapse", "permissions": ["storage", "activeTab", "scripting"], "action": {"default_popup": "popup.html"}, "background": {"service_worker": "background.js"}, "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle"}]}
+    # Improved content.js for NTA Angular sites - no collapse
     content_js = """
-    console.log('UniSync Extension Loaded - Step 3 Data Mode');
+    console.log('UniSync Extension Loaded - NTA Safe Mode');
     chrome.storage.local.get(['unisync_data'], function(result) {
         var data = result.unisync_data;
-        // Fallback to localStorage (from Streamlit app) if chrome storage empty
-        if(!data) {
-            try {
-                var ls = localStorage.getItem('unisync_data');
-                if(ls) data = JSON.parse(ls);
-            } catch(e){}
-        }
-        if(!data) { console.log('UniSync: No data found. Please copy JSON from UniSync Step 4 View JSON and paste in extension popup, or click Bookmarklet.'); return; }
+        if(!data) { console.log('UniSync: No data found, please save from app'); return; }
         var p = data.personal || {};
         var a = data.academic || {};
-        var s = data.score || "";
-        console.log('UniSync: Using data', p);
         function setVal(el, val) {
             if(!val || !el) return false;
-            if(el.type === 'file') return false; // Don't touch file inputs
-            if((el.value && el.value.length > 2) && el.value == val) return false;
+            if(el.value == val) return false;
             try {
                 var proto = Object.getPrototypeOf(el);
                 var desc = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -106,17 +87,8 @@ def create_extension_zip(vault_personal=None, vault_scores=None):
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new Event('change', {bubbles:true}));
                 el.dispatchEvent(new Event('blur', {bubbles:true}));
+                // Angular specific
                 if(window.angular) { try { angular.element(el).triggerHandler('input'); } catch(e){} }
-                if(el.tagName === 'SELECT') {
-                    // Try to select option containing value
-                    for(var i=0;i<el.options.length;i++){
-                        if(el.options[i].text.toLowerCase().includes(String(val).toLowerCase()) || el.options[i].value.toLowerCase().includes(String(val).toLowerCase())){
-                            el.selectedIndex = i;
-                            el.dispatchEvent(new Event('change',{bubbles:true}));
-                            break;
-                        }
-                    }
-                }
                 return true;
             } catch(e) {
                 try { el.value = val; el.dispatchEvent(new Event('input',{bubbles:true})); return true; } catch(e2){ return false; }
@@ -125,77 +97,25 @@ def create_extension_zip(vault_personal=None, vault_scores=None):
         setTimeout(function(){
             var filled = 0;
             document.querySelectorAll('input, textarea, select').forEach(function(el){
-                var key = (el.name + ' ' + (el.id||'') + ' ' + (el.placeholder||'') + ' ' + (el.getAttribute('formcontrolname')||'') + ' ' + (el.getAttribute('autocomplete')||'')).toLowerCase();
-                var type = (el.type||'').toLowerCase();
-                // Full Name
-                if((key.includes('name') || key.includes('candidate')) && !key.includes('father') && !key.includes('mother') && p.fullName) { 
-                    if(key.includes('full') || key.includes('candidate') || key === 'name' || el.name.toLowerCase() === 'name') { if(setVal(el, p.fullName)) filled++; }
-                    else if(key.split(' ').length <= 2 && p.fullName) { if(setVal(el, p.fullName)) filled++; }
-                }
-                // Father
-                else if((key.includes('father')||key.includes('f_name')||key.includes('fathername')) && p.fatherName) { if(setVal(el, p.fatherName)) filled++; }
-                // Mother (use father as fallback if not present)
-                else if(key.includes('mother') && p.fatherName) { /* skip */ }
-                // Mobile
-                else if((key.includes('mobile')||key.includes('phone')||key.includes('contact')) && p.mobile) { if(setVal(el, p.mobile)) filled++; }
-                // Email
+                var key = (el.name + ' ' + (el.id||'') + ' ' + (el.placeholder||'') + ' ' + (el.getAttribute('formcontrolname')||'')).toLowerCase();
+                if(key.includes('name') && !key.includes('father') && p.fullName) { if(setVal(el, p.fullName)) filled++; }
+                else if((key.includes('father')||key.includes('f_name')) && p.fatherName) { if(setVal(el, p.fatherName)) filled++; }
+                else if((key.includes('mobile')||key.includes('phone')) && p.mobile) { if(setVal(el, p.mobile)) filled++; }
                 else if(key.includes('email') && p.email) { if(setVal(el, p.email)) filled++; }
-                // DOB
-                else if((key.includes('dob')||key.includes('birth')||key.includes('date_of_birth')) && p.dob) { if(setVal(el, p.dob)) filled++; }
-                // Category
-                else if(key.includes('category') && p.category) { if(setVal(el, p.category)) filled++; }
-                // 10th percentage
-                else if((key.includes('10th')||key.includes('class_10')||key.includes('tenth')||key.includes('ssc')) && a.class10_percentage) { if(setVal(el, a.class10_percentage)) filled++; }
-                // 12th percentage
-                else if((key.includes('12th')||key.includes('class_12')||key.includes('twelfth')||key.includes('hsc')) && a.class12_percentage) { if(setVal(el, a.class12_percentage)) filled++; }
             });
-            console.log('UniSync: Filled ' + filled + ' fields from DigiLocker + Manual Docs');
+            console.log('UniSync: Filled ' + filled + ' fields');
+            // Show small notification not alert to avoid collapse
             var div = document.createElement('div');
-            div.innerHTML = 'UniSync: ' + filled + ' fields filled from Step 3 (DigiLocker + Manual)!<br><span style=\"font-size:10px;\">Name: ' + (p.fullName||'') + '</span>';
-            div.style.cssText = 'position:fixed;top:10px;right:10px;background:#0f172a;color:white;padding:10px 14px;border-radius:8px;z-index:999999;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,0.3);border-left:4px solid #22c55e;';
+            div.textContent = 'UniSync: ' + filled + ' fields filled!';
+            div.style.cssText = 'position:fixed;top:10px;right:10px;background:#22c55e;color:white;padding:8px 12px;border-radius:6px;z-index:999999;font-size:12px;';
             document.body.appendChild(div);
-            setTimeout(function(){ div.remove(); }, 5000);
-        }, 1800);
+            setTimeout(function(){ div.remove(); }, 3000);
+        }, 1500);
     });
     """
-    popup_html = """<html><head><style>body{width:280px;padding:12px;font-family:sans-serif;} textarea{width:100%;height:80px;font-size:10px;} button{background:#0f172a;color:white;border:none;padding:8px 12px;border-radius:6px;width:100%;margin-top:6px;cursor:pointer;} .success{background:#f0fdf4;border:1px solid #22c55e;padding:6px;border-radius:4px;font-size:11px;margin-top:6px;}</style></head><body>
-    <h3 style="margin:0 0 6px 0;font-size:14px;">🎓 UniSync AutoFill</h3>
-    <p style="font-size:11px;color:#64748b;margin:0 0 8px 0;">Step 3 data (DigiLocker + Manual) auto-fills on any registration site</p>
-    <textarea id="jsonInput" placeholder="Paste JSON from UniSync Step 4 View JSON here..."></textarea>
-    <button id="save">💾 Save Data from Step 3</button>
-    <button id="fill" style="background:#1e40af;">🚀 Fill Now on This Site</button>
-    <div id="status"></div>
-    <div style="font-size:10px;color:#94a3b8;margin-top:8px;">1. Copy JSON from Step 4 View JSON<br>2. Paste here & Save<br>3. Open jeemain.nta.nic.in / REAP / Any site<br>4. Click Fill Now</div>
-    <script src='popup.js'></script></body></html>"""
-    popup_js = """
-    document.getElementById('save').addEventListener('click', function(){
-        var txt = document.getElementById('jsonInput').value;
-        if(!txt) { document.getElementById('status').innerHTML = '<div class=\\'success\\' style=\\'background:#fef2f2;border-color:#fecaca;\\'>Please paste JSON first</div>'; return; }
-        try {
-            var data = JSON.parse(txt);
-            chrome.storage.local.set({unisync_data: data}, function(){
-                localStorage.setItem('unisync_data', JSON.stringify(data));
-                document.getElementById('status').innerHTML = '<div class=\\'success\\'>✅ Saved! Name: ' + (data.personal.fullName||'Student') + '<br>Now open exam site & click Fill Now</div>';
-            });
-        } catch(e) {
-            document.getElementById('status').innerHTML = '<div class=\\'success\\' style=\\'background:#fef2f2;border-color:#fecaca;\\'>Invalid JSON: ' + e.message + '</div>';
-        }
-    });
-    document.getElementById('fill').addEventListener('click', function(){
-        chrome.tabs.query({active:true, currentWindow:true}, function(tabs){
-            chrome.scripting.executeScript({target:{tabId:tabs[0].id}, files:['content.js']});
-            document.getElementById('status').innerHTML = '<div class=\\'success\\'>🚀 Filling data from Step 3 on this page...</div>';
-        });
-    });
-    // Auto-load existing
-    chrome.storage.local.get(['unisync_data'], function(r){
-        if(r.unisync_data) {
-            document.getElementById('status').innerHTML = '<div class=\\'success\\'>✅ Data already saved: ' + (r.unisync_data.personal.fullName||'Student') + '</div>';
-            document.getElementById('jsonInput').value = JSON.stringify(r.unisync_data, null, 2);
-        }
-    });
-    """
-    bg_js = "chrome.runtime.onInstalled.addListener(function(){ console.log('UniSync installed - Step 3 DigiLocker+Manual Ready'); });"
+    popup_html = "<html><body style='width:200px;padding:10px;'><h3>UniSync AutoFill</h3><p>Data auto-filled on NTA sites</p><button id='fill'>Fill Now</button><script src='popup.js'></script></body></html>"
+    popup_js = "document.getElementById('fill').addEventListener('click', function(){ chrome.tabs.query({active:true, currentWindow:true}, function(tabs){ chrome.scripting.executeScript({target:{tabId:tabs[0].id}, files:['content.js']}); }); });"
+    bg_js = "chrome.runtime.onInstalled.addListener(function(){ console.log('UniSync installed - NTA Safe'); });"
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w') as zf:
         zf.writestr('manifest.json', json.dumps(manifest))
@@ -203,9 +123,6 @@ def create_extension_zip(vault_personal=None, vault_scores=None):
         zf.writestr('popup.js', popup_js)
         zf.writestr('background.js', bg_js)
         zf.writestr('content.js', content_js)
-        # Also include README with Step 3 data
-        readme = f"UniSync Step 3 Data - DigiLocker + Manual\nPersonal: {json.dumps(vault_personal, indent=2)}\nScores: {json.dumps(vault_scores, indent=2)}\nThis extension will auto-fill this data on any registration site."
-        zf.writestr('README.txt', readme)
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
 
@@ -245,9 +162,8 @@ def get_scholarship_list(selected_list):
         return [("General", SCHOLARSHIP_SIDEBAR["DEFAULT"])]
     return result
 
-# AUTO-LOAD SAVED DATA IF EXISTS - For One-Time Fill Objective
+# AUTO-LOAD SAVED DATA IF EXISTS - One-time fill objective
 if st.session_state.logged_in and st.session_state.user_email:
-    # Try to auto-load if vault is empty and file exists
     if not st.session_state.vault_data.get("personal") and not st.session_state.vault_data.get("docs"):
         saved = load_user_data(st.session_state.user_email)
         if saved:
@@ -444,18 +360,13 @@ with col_h2:
     docs = st.session_state.vault_data.get("docs", {})
     has_photo = any("Photo" in k for k in docs) or p.get("photo_uploaded", False)
     has_docs_count = len(docs)
-    # Check last saved
-    saved_info = load_user_data(st.session_state.user_email)
-    last_saved_text = saved_info.get("last_saved", "Not saved yet") if saved_info else "Not saved yet"
     st.markdown(f"""
     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;">
     <div style="font-size:0.8rem;font-weight:600;color:#0f172a;">👤 {st.session_state.user_name}</div>
     <div style="font-size:0.65rem;color:#64748b;word-break:break-all;">{st.session_state.user_email}</div>
     <div style="font-size:0.65rem;color:#22c55e;margin-top:4px;">✅ OTP Verified</div>
     <div style="font-size:0.65rem;color:#475569;">🔗 DigiLocker: {'✅ Linked' if st.session_state.gov_linked else '❌ Not Linked'}</div>
-    <div style="font-size:0.65rem;color:#475569;">📄 Docs: {has_docs_count} uploaded (Saved Forever)</div>
-    <div style="font-size:0.6rem;color:#94a3b8;margin-top:3px;">💾 Last saved: {last_saved_text}</div>
-    <div style="font-size:0.6rem;color:#22c55e;">🔒 One-time fill, forever use</div>
+    <div style="font-size:0.65rem;color:#475569;">📄 Docs: {has_docs_count} uploaded</div>
     </div>
     """, unsafe_allow_html=True)
     if st.button("🚪 Logout", key="logout", use_container_width=True, type="secondary"):
@@ -705,8 +616,6 @@ with col_digi:
             st.session_state.vault_data["personal"] = {"name": "Aman Kumar Sharma", "fatherName": "Rajesh Kumar Sharma", "dob": "12-08-2004", "category": "OBC-NCL", "mobile": st.session_state.otp_mobile if st.session_state.otp_mobile else "98XXXXXX10", "email": st.session_state.user_email, "class10_percentage": "92.4", "class12_percentage": "88.6"}
             st.session_state.vault_data["docs"] = {"🎓 Class 10th Marksheet": "DigiLocker", "📝 Class 12th Marksheet": "DigiLocker", "🏷 Category Certificate": "DigiLocker"}
             st.session_state.gov_linked = True
-            # SAVE PERMANENTLY - One-time fill objective
-            save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
             st.rerun()
     else:
         st.success("✅ DigiLocker Linked")
@@ -723,10 +632,9 @@ if not has_12th:
     pending.append("12th")
 
 if pending:
-    st.warning(f"Pending: {', '.join(pending)} - Upload below (Once uploaded, saved forever - no need to upload again after login)")
+    st.warning(f"Pending: {', '.join(pending)} - Upload below")
 else:
-    st.success("✅ All documents ready - Saved permanently! Next time you login, you will find all data here and can directly fill any form in Step 4")
-    save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
+    st.success("✅ All documents ready")
 
 # FORMAT GUIDE - CORRECTED - PDF/JPG BOTH ACCEPTED - NO MISMATCH
 st.markdown("""<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:0.7rem;"><b>Format Guide (System Works):</b> Photo: JPG/PNG 10-200KB White BG | Sign: JPG/PNG 10-50KB | Marksheets: PDF/JPG/PNG Max 2MB | Scorecard: PDF/JPG/PNG Max 2MB | Accepted: JPG, JPEG, PNG, PDF</div>""", unsafe_allow_html=True)
@@ -765,7 +673,7 @@ for idx, (name, found, key, fmt) in enumerate(items):
                         st.session_state.vault_data["personal"]["photo_uploaded"] = True
                     elif "Sign" in name:
                         st.session_state.vault_data["personal"]["sign_uploaded"] = True
-                    st.success(f"✅ {name} uploaded - Saved permanently, will be there after login")
+                    st.success(f"✅ {name} uploaded - Saved permanently")
                     save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
                     st.rerun()
         else:
@@ -943,80 +851,161 @@ else:
         st.text_input("Score", value=ds['score_val'] if ds['score'] else "N/A", disabled=True, key="p_score")
     docs_status = ds
 
-# AUTOFILL - VERTICAL MODE - DOT CLICK LIKE STEP 2
-st.markdown("#### AutoFill - Choose Option")
 
-AUTOFILL_OPTIONS = {
-    "Bookmarklet": "🔖 Bookmarklet (Simple - No Install) - Drag to bookmark bar",
-    "Chrome Extension": "📦 Chrome Extension (1-Click) - Download & Install",
-}
+# STEP 4 - SIMPLIFIED FOR POPULARITY - 2 BEST OPTIONS (Laptop AutoFill + Mobile Copy Cards) - No JSON Copy-Paste
+st.markdown("---")
+st.markdown("## Step 4: Apply Now - 2 Easy Options (Choose Any)")
 
-st.markdown("""<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #1e40af;border-radius:6px;padding:8px 10px;margin-bottom:8px;"><h4 style="margin:0;color:#0f172a;font-size:0.9rem;">AutoFill Methods - Select by Dot</h4></div>""", unsafe_allow_html=True)
+# Data preview already shown above - now show 2 options
+st.markdown("""
+<div style="background:linear-gradient(135deg,#0f172a 0%,#1e40af 100%);color:white;padding:14px 18px;border-radius:10px;margin:12px 0;">
+<div style="font-size:1rem;font-weight:800;">🎯 Your Data is Ready - One-Time Fill Done! Now Apply Anywhere in 1-Click</div>
+<div style="font-size:0.75rem;color:#bfdbfe;margin-top:4px;">Choose Laptop (Auto-Fill) or Mobile (Copy Cards) - Both work, if one fails try other</div>
+</div>
+""", unsafe_allow_html=True)
 
-for idx, (opt_key, opt_desc) in enumerate(AUTOFILL_OPTIONS.items()):
-    sel = opt_key in st.session_state.selected_autofill
-    dot = "🟢" if sel else "⚪"
-    checked = st.checkbox(f"{dot} {opt_desc}", value=sel, key=f"autofill_{opt_key}")
-    if checked and opt_key not in st.session_state.selected_autofill:
-        st.session_state.selected_autofill.append(opt_key)
-        st.rerun()
-    elif not checked and opt_key in st.session_state.selected_autofill:
-        st.session_state.selected_autofill.remove(opt_key)
-        st.rerun()
-    
-    # Show action only if selected - VERTICAL - FIXED FOR NTA SITE - NO COLLAPSE
-    if opt_key in st.session_state.selected_autofill:
-            if opt_key == "Bookmarklet":
-                bm = """javascript:(function(){try{var d=null;try{d=JSON.parse(localStorage.getItem('unisync_data'))}catch(e){}if(!d){var i=prompt('Paste UniSync JSON (from Step 4 View JSON):');if(i){try{d=JSON.parse(i);localStorage.setItem('unisync_data',JSON.stringify(d))}catch(e){alert('Invalid JSON');return}}else return}var p=d.personal||{},a=d.academic||{},s=d.score||{},f=0;function setVal(el,val){if(!val||!el)return false;if(el.value==val)return false;try{var proto=Object.getPrototypeOf(el);var desc=Object.getOwnPropertyDescriptor(proto,'value');if(desc&&desc.set){desc.set.call(el,val)}else{el.value=val}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));return true}catch(e){try{el.value=val;el.dispatchEvent(new Event('input',{bubbles:true}));return true}catch(e2){return false}}}var inputs=document.querySelectorAll('input,select,textarea');inputs.forEach(function(el){var key=(el.name+' '+(el.id||'')+' '+(el.placeholder||'')+' '+(el.getAttribute('formcontrolname')||'')).toLowerCase();if(key.includes('name')&&!key.includes('father')&&p.fullName){if(setVal(el,p.fullName))f++}else if((key.includes('father')||key.includes('f_name'))&&p.fatherName){if(setVal(el,p.fatherName))f++}else if((key.includes('mobile')||key.includes('phone'))&&p.mobile){if(setVal(el,p.mobile))f++}else if(key.includes('email')&&p.email){if(setVal(el,p.email))f++}else if((key.includes('dob')||key.includes('birth'))&&p.dob){if(setVal(el,p.dob))f++}});alert('UniSync: '+f+' fields filled! If site uses DigiLocker, fields already from DigiLocker will not be overwritten. For NTA site, please use Chrome Extension for best result.');}catch(err){alert('UniSync Error: '+err.message+' - Try Chrome Extension instead for NTA site')}})();"""
-                st.markdown(f"""<div style="margin-top:6px;background:#fff3cd;border:1px solid #ffc107;padding:8px;border-radius:6px;"><a href="{bm}" style="display:inline-block;background:#1e40af;color:white;padding:8px 14px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:0.8rem;">🔖 Drag to Bookmarks - NTA Safe</a><br><span style="font-size:0.65rem;color:#856404;margin-top:4px;display:block;">⚠ NTA site (jeemain.nta.nic.in) has DigiLocker auto-fill + Angular security - If bookmark collapses site, use Chrome Extension below (Recommended for JEE)</span><br><span style="font-size:0.6rem;color:#64748b;">Ctrl+Shift+B for bookmark bar → Drag this link to bookmarks bar</span></div>""", unsafe_allow_html=True)
-            else:
-                try:
-                    zip_data = create_extension_zip(vault_personal=st.session_state.vault_data.get('personal',{}), vault_scores=st.session_state.vault_data.get('scores',{}))
-                    st.download_button("📦 Download Extension - Selected (With Your Step 3 Data)", data=zip_data, file_name="unisync-extension-with-step3-data.zip", mime="application/zip", use_container_width=True, type="primary", key=f"ext_{opt_key}")
-                except Exception as e:
-                    st.download_button("📦 Extension - JSON Fallback", data=json_str.encode(), file_name="unisync-step3-data.json", mime="application/json", use_container_width=True, key=f"ext_{opt_key}_fallback")
-                    st.caption(f"Zip error: {e} - Use JSON file instead")
-                st.caption("chrome://extensions → Developer Mode ON → Load Unpacked")
-
-# Auto-save Step 3 data to browser localStorage for bookmarklet
+# Show data summary
 if data is not None:
-    st.components.v1.html(f"""
-    <script>
-    try {{
-        localStorage.setItem('unisync_data', `{json_str}`);
-        console.log('UniSync: Step 3 data (DigiLocker+Manual) saved to localStorage for AutoFill');
-    }} catch(e){{ console.log(e); }}
-    </script>
-    """, height=0)
+    pers = data["personal"]
+    st.markdown(f"""<div style="background:#f0fdf4;border:1px solid #22c55e;border-radius:8px;padding:8px 12px;margin:8px 0;font-size:0.85rem;">
+    ✅ <b>{pers.get('name','Student')}</b> | {pers.get('mobile','')} | {pers.get('category','')} | Ready to Auto-Fill on any site
+    </div>""", unsafe_allow_html=True)
 
-if st.session_state.selected_autofill:
-    st.success(f"✅ {len(st.session_state.selected_autofill)} AutoFill method selected - Your Step 3 data (DigiLocker + Manual) will auto-fill on exam site")
-    with st.expander("📋 View JSON - Copy this for Extension (Contains Your DigiLocker + Manual Data)", expanded=True):
-        st.text_area("JSON - Your Step 3 Data (DigiLocker + Manual)", value=json_str, height=120, key="json_v")
-        st.caption("👆 Copy this JSON → Open Extension Popup → Paste → Save → Then open any registration site → Fill Now")
-else:
-    st.info("👆 Click dot above to select AutoFill method - Then your Step 3 data will auto-fill")
+tab1, tab2 = st.tabs(["🖥️ Option 1: Laptop - 1-Click AutoFill (Recommended)", "📱 Option 2: Mobile - Smart Copy Cards (No Install)"])
+
+with tab1:
+    st.markdown("""
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-left:4px solid #1e40af;border-radius:8px;padding:12px;margin-bottom:10px;">
+    <div style="font-size:0.9rem;font-weight:700;color:#1e40af;">🖥️ Best for Laptop - JEE, REAP, JoSAA, LNMIIT (Auto-Fills)</div>
+    <div style="font-size:0.75rem;color:#475569;margin-top:4px;">1. Click Enable → 2. Install Extension → 3. Open Exam Site → Auto-Fills</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col_en, col_dl = st.columns(2)
+    with col_en:
+        if st.button("🚀 Enable AutoFill - 1 Click (Save My Data for Auto-Fill)", use_container_width=True, type="primary", key="enable_autofill_popular"):
+            # Save to localStorage for extension via JS
+            st.components.v1.html(f"""
+            <script>
+            try {{
+                localStorage.setItem('unisync_data', `{json_str}`);
+                // Try to send to extension if installed
+                if(window.chrome && chrome.runtime) {{
+                    try {{ chrome.runtime.sendMessage({{action: "saveData", data: {json_str}}}); }} catch(e){{}}
+                }}
+                console.log('UniSync: AutoFill Enabled');
+            }} catch(e){{ console.log(e); }}
+            </script>
+            <div style="background:#f0fdf4;border:1px solid #22c55e;padding:8px;border-radius:6px;font-size:0.8rem;">✅ AutoFill Enabled! Data saved for extension. Now install extension and open exam site.</div>
+            """, height=60)
+            st.success("✅ AutoFill Enabled! Your Step 3 data (DigiLocker + Manual) is now ready to auto-fill on any site")
+            save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
+    
+    with col_dl:
+        try:
+            zip_data = create_extension_zip(vault_personal=st.session_state.vault_data.get('personal',{}), vault_scores=st.session_state.vault_data.get('scores',{}))
+            st.download_button("📦 Download UniSync Extension (1-Click Install)", data=zip_data, file_name="unisync-extension-1click.zip", mime="application/zip", use_container_width=True, type="secondary", key="dl_ext_popular")
+        except:
+            st.download_button("📥 Download Backup JSON", data=json_str.encode(), file_name="unisync-data.json", mime="application/json", use_container_width=True, key="dl_json_backup_pop")
+        st.caption("chrome://extensions → Developer Mode ON → Load Unpacked → Done")
+    
+    st.info("💡 After Enable: Open jeemain.nta.nic.in / reap2025.com / admissions.lnmiit.ac.in → Extension auto-fills your Name, Father Name, Mobile, Email, DOB, Category")
+    
+    # Apply Now buttons for Option 1
+    st.markdown("#### 🎯 Apply Now - Click Any Exam (Auto-Fills if Extension Installed)")
+    if not st.session_state.selected_endpoints:
+        display_endpoints_tab1 = ["JEE Main", "BITSAT", "NEET UG - MBBS, BDS", "CUET UG - DU, BHU, JNU, AMU", "JoSAA - IIT, NIT, IIIT, GFTI", "LNMIIT Jaipur", "REAP Rajasthan - Govt & Pvt Colleges Rajasthan - RTU, JECRC, SKIT, Poornima, Arya", "MCC NEET UG - MBBS, BDS (AIIMS, JIPMER)"]
+    else:
+        display_endpoints_tab1 = st.session_state.selected_endpoints
+    
+    cols1 = st.columns(2)
+    for idx, ep in enumerate(display_endpoints_tab1):
+        url = get_url(ep)
+        direct_url = get_direct(ep)
+        with cols1[idx % 2]:
+            st.markdown(f"""<div style="border:1px solid #e2e8f0;border-radius:6px;padding:6px;background:white;margin-bottom:2px;"><b style="font-size:0.8rem;">{ep}</b></div>""", unsafe_allow_html=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.link_button("📝 Apply Now", direct_url, type="primary", use_container_width=True, key=f"apply_tab1_{ep}_{idx}")
+            with c2:
+                st.link_button("🏠 Info", url, use_container_width=True, key=f"info_tab1_{ep}_{idx}")
+
+with tab2:
+    st.markdown("""
+    <div style="background:#fffbeb;border:1px solid #fde68a;border-left:4px solid #f59e0b;border-radius:8px;padding:12px;margin-bottom:10px;">
+    <div style="font-size:0.9rem;font-weight:700;color:#92400e;">📱 Best for Mobile - No Extension, No Install (Works on Phone)</div>
+    <div style="font-size:0.75rem;color:#78350f;margin-top:4px;">If Extension fails on NTA site, use this - Always works, 1 tap copy</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if data is None:
+        st.warning("Upload docs in Step 3 first - Then copy cards will appear here")
+        pers = {}
+    else:
+        pers = data["personal"]
+        ds = data["docs_status"]
+        
+        # Smart Copy Cards
+        st.markdown("#### 📋 Your Data - Tap Copy to Fill Any Form")
+        
+        # Create copy cards with JS
+        cards = [
+            ("👤 Full Name", pers.get("name",""), "fullName"),
+            ("👨‍👦 Father Name", pers.get("fatherName",""), "fatherName"),
+            ("📱 Mobile", pers.get("mobile",""), "mobile"),
+            ("📧 Email", pers.get("email",""), "email"),
+            ("🎂 DOB", pers.get("dob",""), "dob"),
+            ("🏷️ Category", pers.get("category",""), "category"),
+            ("🎓 10th %", pers.get("class10_percentage",""), "10th"),
+            ("📝 12th %", pers.get("class12_percentage",""), "12th"),
+            ("📊 Rank/Score", ds.get("score_val",""), "score"),
+        ]
+        
+        cols_cards = st.columns(2)
+        for i, (label, val, key) in enumerate(cards):
+            if not val:
+                continue
+            with cols_cards[i % 2]:
+                st.markdown(f"""
+                <div style="border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;margin-bottom:8px;background:white;display:flex;justify-content:space-between;align-items:center;">
+                <div><div style="font-size:0.7rem;color:#64748b;">{label}</div><div style="font-size:0.85rem;font-weight:600;color:#0f172a;">{val}</div></div>
+                <div><button onclick="navigator.clipboard.writeText('{val}'); this.innerText='✅';" style="background:#0f172a;color:white;border:none;padding:6px 10px;border-radius:6px;font-size:0.7rem;cursor:pointer;">📋 Copy</button></div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Copy All
+        all_text = f"Name: {pers.get('name','')}\nFather: {pers.get('fatherName','')}\nMobile: {pers.get('mobile','')}\nEmail: {pers.get('email','')}\nDOB: {pers.get('dob','')}\nCategory: {pers.get('category','')}\n10th: {pers.get('class10_percentage','')}%\n12th: {pers.get('class12_percentage','')}%"
+        
+        st.markdown("---")
+        col_all1, col_all2 = st.columns(2)
+        with col_all1:
+            st.components.v1.html(f"""
+            <button onclick="navigator.clipboard.writeText(`{all_text}`); this.innerText='✅ All Copied!';" style="background:#22c55e;color:white;border:none;padding:10px 14px;border-radius:8px;width:100%;cursor:pointer;font-weight:600;">📋 Copy All Details (1-Click)</button>
+            """, height=50)
+        with col_all2:
+            wa_text = f"My Details: Name {pers.get('name','')}, Mobile {pers.get('mobile','')}, Email {pers.get('email','')}"
+            st.link_button(f"💬 Share via WhatsApp", f"https://wa.me/?text={wa_text.replace(' ', '%20')}", use_container_width=True)
+        
+        st.success("✅ On Phone: Tap Copy on any card → Open exam site (jeemain.nta.nic.in) → Long press on field → Paste → Done! No extension needed")
+    
+    st.markdown("#### 🎯 Apply Now - Mobile Friendly Links")
+    if not st.session_state.selected_endpoints:
+        display_endpoints_tab2 = ["JEE Main", "NEET UG - MBBS, BDS", "REAP Rajasthan - Govt & Pvt Colleges Rajasthan - RTU, JECRC, SKIT, Poornima, Arya", "LNMIIT Jaipur"]
+    else:
+        display_endpoints_tab2 = st.session_state.selected_endpoints[:6]
+    
+    cols2 = st.columns(2)
+    for idx, ep in enumerate(display_endpoints_tab2):
+        direct_url = get_direct(ep)
+        with cols2[idx % 2]:
+            st.link_button(f"📝 {ep} - Apply", direct_url, use_container_width=True, key=f"apply_tab2_{ep}_{idx}")
 
 st.markdown("---")
-st.markdown(f"#### Apply Now - {len(st.session_state.selected_endpoints) if st.session_state.selected_endpoints else 'All Exams Visible'} - Official Links")
-
-if not st.session_state.selected_endpoints:
-    st.info("Select exams in Step 2 to filter - Showing all popular exams below")
-    display_endpoints = ["JEE Main", "BITSAT", "NEET UG - MBBS, BDS", "CUET UG - DU, BHU, JNU, AMU", "JoSAA - IIT, NIT, IIIT, GFTI", "LNMIIT Jaipur", "REAP Rajasthan", "MCC NEET UG - MBBS, BDS"]
-else:
-    display_endpoints = st.session_state.selected_endpoints
-
-cols = st.columns(2)
-for idx, ep in enumerate(display_endpoints):
-    url = get_url(ep)
-    direct_url = get_direct(ep)
-    with cols[idx % 2]:
-        st.markdown(f"""<div style="border:1px solid #e2e8f0;border-radius:6px;padding:8px;margin-bottom:4px;background:white;"><b style="font-size:0.8rem;">{ep}</b><br><span style="font-size:0.6rem;color:#64748b;">{url}</span><br><span style="font-size:0.6rem;color:#22c55e;">✅ Verified Official</span></div>""", unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.link_button("📝 Apply Now", direct_url, type="primary", use_container_width=True, key=f"ap_{ep}_{idx}")
-        with c2:
-            st.link_button("🏠 Info", url, use_container_width=True, key=f"in_{ep}_{idx}")
+st.markdown("""
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;text-align:center;font-size:0.75rem;color:#475569;">
+💡 <b>Why 2 Options?</b> Laptop users love Auto-Fill Extension (1-Click), Mobile users love Copy Cards (No Install). If one fails, try other - Both use your same Step 3 data (DigiLocker + Manual) saved forever after login.
+</div>
+""", unsafe_allow_html=True)
 
 
 
