@@ -5,6 +5,55 @@ import json
 import zipfile
 import io
 import random
+import os
+import re
+from datetime import datetime
+
+DATA_DIR = "data"
+try:
+    from PIL import Image, ImageOps
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    Image = None
+    ImageOps = None
+
+
+def save_user_data(email, vault_data, selected_endpoints, gov_linked):
+    """Save user data permanently to data/ folder - One-time fill forever"""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        safe_email = re.sub(r'[^a-zA-Z0-9@._-]', '_', email)
+        file_path = os.path.join(DATA_DIR, f"{safe_email}.json")
+        data = {
+            "email": email,
+            "vault_data": vault_data,
+            "selected_endpoints": selected_endpoints,
+            "gov_linked": gov_linked,
+            "saved_at": datetime.now().isoformat()
+        }
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"Save error: {e}")
+        return False
+
+def load_user_data(email):
+    """Load user data from data/ folder if exists"""
+    try:
+        safe_email = re.sub(r'[^a-zA-Z0-9@._-]', '_', email)
+        file_path = os.path.join(DATA_DIR, f"{safe_email}.json")
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data
+        return None
+    except Exception as e:
+        print(f"Load error: {e}")
+        return None
+
+
 
 st.set_page_config(page_title="UniSync - One Stop Solution", page_icon="🎓", layout="wide", initial_sidebar_state="collapsed")
 
@@ -140,40 +189,115 @@ SCHOLARSHIP_PG = [
 ]
 
 
-def save_user_data(email, vault_data, selected_endpoints, gov_linked):
-    """Save user data permanently to data/ folder - One-time fill forever"""
+def process_portal_image(uploaded_file, target_w, target_h, min_kb, max_kb, is_signature=False):
+    """Auto-rotate, white background for transparent PNG, crop to exact shape, resize, optimize KB"""
+    if not PIL_AVAILABLE:
+        return None, "Pillow not installed - Run pip install pillow", 0
+    
     try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        # Sanitize email for filename
-        safe_email = re.sub(r'[^a-zA-Z0-9@._-]', '_', email)
-        file_path = os.path.join(DATA_DIR, f"{safe_email}.json")
-        data = {
-            "email": email,
-            "vault_data": vault_data,
-            "selected_endpoints": selected_endpoints,
-            "gov_linked": gov_linked,
-            "saved_at": datetime.now().isoformat()
-        }
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        return True
+        # Read image
+        img = Image.open(uploaded_file)
+        
+        # Auto-rotate based on EXIF (phone photos)
+        try:
+            img = ImageOps.exif_transpose(img)
+        except:
+            pass
+        
+        # Handle transparent PNG - place on white background (for signatures)
+        if img.mode in ('RGBA', 'LA', 'PA') or (img.mode == 'P' and 'transparency' in img.info):
+            # Create white background
+            bg = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            bg.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            img = bg
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Crop to exact aspect ratio (center crop)
+        target_ratio = target_w / target_h
+        img_ratio = img.width / img.height
+        
+        if img_ratio > target_ratio:
+            # Image wider - crop width
+            new_width = int(img.height * target_ratio)
+            left = (img.width - new_width) // 2
+            img = img.crop((left, 0, left + new_width, img.height))
+        else:
+            # Image taller - crop height
+            new_height = int(img.width / target_ratio)
+            top = (img.height - new_height) // 2
+            img = img.crop((0, top, img.width, top + new_height))
+        
+        # Resize to exact dimensions
+        img = img.resize((target_w, target_h), Image.LANCZOS)
+        
+        # Find best quality to stay under max_kb
+        import io as bio
+        min_bytes = min_kb * 1024
+        max_bytes = max_kb * 1024
+        
+        best_data = None
+        best_quality = 95
+        best_size = 0
+        
+        # Try qualities from 95 down to 20
+        for quality in range(95, 15, -5):
+            buffer = bio.BytesIO()
+            img.save(buffer, format='JPEG', quality=quality, optimize=True)
+            size = buffer.tell()
+            if size <= max_bytes:
+                best_data = buffer.getvalue()
+                best_quality = quality
+                best_size = size
+                break
+        
+        # If still too large even at lowest quality, resize smaller then upscale? For now use lowest
+        if best_data is None:
+            buffer = bio.BytesIO()
+            img.save(buffer, format='JPEG', quality=20, optimize=True)
+            best_data = buffer.getvalue()
+            best_size = buffer.tell()
+            best_quality = 20
+        
+        # If below min_kb, enlarge slightly (increase quality or add padding)
+        if best_size < min_bytes:
+            # Try higher quality up to 95 to reach min
+            for quality in range(best_quality + 5, 96, 5):
+                buffer = bio.BytesIO()
+                img.save(buffer, format='JPEG', quality=quality, optimize=True)
+                size = buffer.tell()
+                if size >= min_bytes and size <= max_bytes:
+                    best_data = buffer.getvalue()
+                    best_size = size
+                    best_quality = quality
+                    break
+                elif size <= max_bytes:
+                    best_data = buffer.getvalue()
+                    best_size = size
+                    best_quality = quality
+            
+            # If still below min, add slight enlargement by scaling up 5%
+            if best_size < min_bytes:
+                enlarged_w = int(target_w * 1.05)
+                enlarged_h = int(target_h * 1.05)
+                enlarged = img.resize((enlarged_w, enlarged_h), Image.LANCZOS)
+                enlarged = enlarged.resize((target_w, target_h), Image.LANCZOS)
+                buffer = bio.BytesIO()
+                enlarged.save(buffer, format='JPEG', quality=95, optimize=True)
+                if buffer.tell() >= min_bytes and buffer.tell() <= max_bytes:
+                    best_data = buffer.getvalue()
+                    best_size = buffer.tell()
+        
+        return best_data, f"Ready: {best_size/1024:.1f}KB ({target_w}x{target_h}) Q{best_quality} - Portal will accept", best_size
+        
     except Exception as e:
-        print(f"Save error: {e}")
-        return False
+        return None, f"Error: {str(e)} - Try another image", 0
 
-def load_user_data(email):
-    """Load user data from data/ folder if exists"""
-    try:
-        safe_email = re.sub(r'[^a-zA-Z0-9@._-]', '_', email)
-        file_path = os.path.join(DATA_DIR, f"{safe_email}.json")
-        if os.path.exists(file_path):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return data
-        return None
-    except Exception as e:
-        print(f"Load error: {e}")
-        return None
+
+
+
 
 
 def get_scholarship_list(selected_list):
@@ -432,13 +556,16 @@ with st.sidebar:
         if sch_search and sch_search.lower() not in (sch["name"] + sch["desc"] + sch["type"]).lower():
             return False
         st.markdown(f"""
-        <div style="background:white;border:1px solid #e2e8f0;border-left:4px solid #1e40af;border-radius:8px;padding:10px;margin-bottom:8px;">
-        <div style="font-size:0.8rem;font-weight:700;color:#0f172a;">{sch['name']}</div>
-        <div style="font-size:0.65rem;color:#22c55e;font-weight:600;margin:2px 0;">💰 {sch['amount']} | 📅 {sch['deadline']} | {sch['type']}</div>
-        <div style="font-size:0.65rem;color:#475569;margin:3px 0;line-height:1.3;">{sch['desc']}</div>
-        <div style="margin-top:6px;"><a href="{sch['link']}" target="_blank" style="background:#0f172a;color:white;padding:4px 10px;border-radius:4px;font-size:0.65rem;text-decoration:none;display:inline-block;">🔗 Apply</a> <span style="font-size:0.55rem;color:#94a3b8;margin-left:4px;">{sch['link'][:28]}...</span></div>
+        <div style="background:white;border:1px solid #e2e8f0;border-left:4px solid #1e40af;border-radius:8px;padding:10px 10px 4px 10px;margin-bottom:0px;">
+        <div style="font-size:0.8rem;font-weight:700;color:#0f172a;line-height:1.2;">{sch['name']}</div>
+        <div style="font-size:0.65rem;color:#22c55e;font-weight:600;margin:3px 0;">💰 {sch['amount']}</div>
+        <div style="font-size:0.6rem;color:#1e40af;font-weight:600;">📅 {sch['deadline']} | {sch['type']}</div>
+        <div style="font-size:0.62rem;color:#475569;margin:4px 0 0 0;line-height:1.3;">{sch['desc']}</div>
         </div>
         """, unsafe_allow_html=True)
+        st.link_button(f"🔗 Apply - {sch['name'][:22]}", sch['link'], use_container_width=True, type="secondary")
+        st.caption(f"{sch['link']}")
+        st.markdown("<div style='margin-bottom:10px;'></div>", unsafe_allow_html=True)
         return True
     
     with tab_ug:
@@ -632,7 +759,7 @@ for rs in range(0, len(cats), 4):
                 # Use columns to show checkbox + colored badge same line
                 c_chk, c_date = st.columns([3.2, 1.8])
                 with c_chk:
-                    # SINGLE SELECTION ONLY - Only 1 exam at a time, disable others until deselected (as per your instruction)
+                    # SINGLE SELECTION ONLY - Only 1 exam at a time
                     already_one_selected = len(st.session_state.selected_endpoints) >= 1 and ex not in st.session_state.selected_endpoints
                     if already_one_selected:
                         st.checkbox(f"{dot} {ex} ⛔ Only 1 allowed - Deselect {st.session_state.selected_endpoints[0]} first", value=False, key=f"chk_{cat}_{ex}_{rs}_{ci}_{date_str[:2]}", disabled=True)
@@ -644,7 +771,7 @@ for rs in range(0, len(cats), 4):
                         st.markdown(f"""<div style="background:{badge_bg};color:{badge_color};border:1px solid {border};font-size:0.6rem;font-weight:600;padding:2px 6px;border-radius:10px;text-align:center;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{date_str}</div>""", unsafe_allow_html=True)
                 
                 if checked and ex not in st.session_state.selected_endpoints:
-                    st.session_state.selected_endpoints = [ex]  # SINGLE SELECTION ONLY - Only 1 at a time
+                    st.session_state.selected_endpoints = [ex]  # SINGLE SELECTION ONLY
                     st.rerun()
                 elif not checked and ex in st.session_state.selected_endpoints:
                     st.session_state.selected_endpoints.remove(ex)
@@ -706,24 +833,94 @@ for idx, (name, found, key, fmt) in enumerate(items):
                     st.session_state.vault_data["scores"][f"Rank {idx}"] = s
                     st.rerun()
             else:
-                f = st.file_uploader(f"Upload {name}", key=f"up_{idx}_{key}", type=["jpg","jpeg","png","pdf"], label_visibility="collapsed")
-                if f:
-                    st.session_state.vault_data["docs"][name] = f.name
-                    if "10th" in name:
-                        st.session_state.vault_data["personal"]["class10_percentage"] = "92.4"
-                        st.session_state.vault_data["personal"]["name"] = st.session_state.vault_data["personal"].get("name", "Aman Kumar Sharma")
-                        st.session_state.vault_data["personal"]["fatherName"] = "Rajesh Kumar Sharma"
-                    elif "12th" in name:
-                        st.session_state.vault_data["personal"]["class12_percentage"] = "88.6"
-                    elif "Category" in name:
-                        st.session_state.vault_data["personal"]["category"] = "OBC-NCL"
-                    elif "Photo" in name:
-                        st.session_state.vault_data["personal"]["photo_uploaded"] = True
-                    elif "Sign" in name:
-                        st.session_state.vault_data["personal"]["sign_uploaded"] = True
-                    st.success(f"✅ {name} uploaded - Saved permanently")
-                    save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
-                    st.rerun()
+                # Check if this is Photo or Signature - Use auto-fix
+                is_photo = "Photo" in name
+                is_sign = "Sign" in name
+                
+                if is_photo or is_sign:
+                    # Presets: passport photo (413x531, 10-200KB), signature (350x140, 4-30KB)
+                    if is_photo:
+                        target_w, target_h, min_kb, max_kb = 413, 531, 10, 200
+                        preset_name = "Passport Photo (413×531, 10-200KB)"
+                    else:
+                        target_w, target_h, min_kb, max_kb = 350, 140, 4, 30
+                        preset_name = "Signature (350×140, 4-30KB)"
+                    
+                    f = st.file_uploader(f"Upload {name} - {preset_name} - Any JPG/PNG/WebP (Phone photo OK)", key=f"up_{idx}_{key}", type=["jpg","jpeg","png","webp","pdf"], label_visibility="collapsed")
+                    
+                    if f:
+                        if f.type == "application/pdf":
+                            # PDF for marksheets - keep as is
+                            st.session_state.vault_data["docs"][name] = f.name
+                            if "Photo" in name:
+                                st.session_state.vault_data["personal"]["photo_uploaded"] = True
+                            elif "Sign" in name:
+                                st.session_state.vault_data["personal"]["sign_uploaded"] = True
+                            st.success(f"✅ {name} uploaded - Saved permanently")
+                            save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
+                            st.rerun()
+                        else:
+                            # Image - Auto-fix to portal size
+                            if not PIL_AVAILABLE:
+                                st.error("Run pip install pillow to enable auto-fix")
+                                st.session_state.vault_data["docs"][name] = f.name
+                                st.rerun()
+                            else:
+                                with st.spinner(f"Auto-fixing {name} to {preset_name}..."):
+                                    processed_data, msg, size = process_portal_image(f, target_w, target_h, min_kb, max_kb, is_signature=is_sign)
+                                
+                                if processed_data:
+                                    # Save processed image to data folder
+                                    try:
+                                        os.makedirs(DATA_DIR, exist_ok=True)
+                                        safe_email = re.sub(r'[^a-zA-Z0-9@._-]', '_', st.session_state.user_email)
+                                        # Save processed file
+                                        ext = ".jpg"
+                                        file_name = f"{safe_email}_{key}_portal{ext}"
+                                        file_path = os.path.join(DATA_DIR, file_name)
+                                        with open(file_path, 'wb') as out:
+                                            out.write(processed_data)
+                                        
+                                        st.session_state.vault_data["docs"][name] = f"{name} - {msg}"
+                                        if "Photo" in name:
+                                            st.session_state.vault_data["personal"]["photo_uploaded"] = True
+                                        elif "Sign" in name:
+                                            st.session_state.vault_data["personal"]["sign_uploaded"] = True
+                                        
+                                        # Show preview
+                                        st.image(processed_data, caption=f"✅ {msg}", width=150)
+                                        st.success(f"✅ {name} auto-fixed: {msg} - Portal will accept! Saved permanently")
+                                        save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
+                                        
+                                        # Download button for processed file
+                                        st.download_button(f"📥 Download Portal-Ready {name}", data=processed_data, file_name=f"portal_{key}.jpg", mime="image/jpeg", key=f"dl_{idx}_{key}")
+                                        
+                                        time.sleep(1)
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Save error: {e}")
+                                else:
+                                    st.error(msg)
+                else:
+                    # For 10th, 12th, Category - Original logic (PDF/JPG/PNG Max 2MB)
+                    f = st.file_uploader(f"Upload {name}", key=f"up_{idx}_{key}", type=["jpg","jpeg","png","pdf"], label_visibility="collapsed")
+                    if f:
+                        st.session_state.vault_data["docs"][name] = f.name
+                        if "10th" in name:
+                            st.session_state.vault_data["personal"]["class10_percentage"] = "92.4"
+                            st.session_state.vault_data["personal"]["name"] = st.session_state.vault_data["personal"].get("name", "Aman Kumar Sharma")
+                            st.session_state.vault_data["personal"]["fatherName"] = "Rajesh Kumar Sharma"
+                        elif "12th" in name:
+                            st.session_state.vault_data["personal"]["class12_percentage"] = "88.6"
+                        elif "Category" in name:
+                            st.session_state.vault_data["personal"]["category"] = "OBC-NCL"
+                        elif "Photo" in name:
+                            st.session_state.vault_data["personal"]["photo_uploaded"] = True
+                        elif "Sign" in name:
+                            st.session_state.vault_data["personal"]["sign_uploaded"] = True
+                        st.success(f"✅ {name} uploaded - Saved permanently")
+                        save_user_data(st.session_state.user_email, st.session_state.vault_data, st.session_state.selected_endpoints, st.session_state.gov_linked)
+                        st.rerun()
         else:
             st.markdown(f"""<div style="border:1px solid #86efac;background:#f0fdf4;border-radius:6px;padding:6px;margin-bottom:4px;min-height:50px;"><b style="color:#15803d;font-size:0.75rem;">✅ {name}</b><br><span style="font-size:0.6rem;color:#166534;">{docs.get(name,'Ready')} | {fmt}</span></div>""", unsafe_allow_html=True)
             c1, c2 = st.columns(2)
@@ -946,12 +1143,12 @@ if st.session_state.selected_autofill:
             st.caption("Open Puzzle Icon → UniSync → Paste → Save")
         st.info("**How to use after Copy:** 1. Copy from code box (top-right copy icon) 2. Open Chrome Extension 3. Paste → Save Data from Step 3 4. Open exam site → Fill Now")
 else:
-    st.info("👆 Click dot above to select AutoFill method - Then your Step 3 data will auto-fill")
+        st.info("👆 Click dot above to select AutoFill method - Then your Step 3 data will auto-fill")
 
 st.markdown("---")
-# DYNAMIC HEADER - Show only selected exam name to avoid confusion (only selected exam, not ALL list)
+# DYNAMIC HEADER - Show only selected exam name to avoid confusion
 if st.session_state.selected_endpoints:
-    st.markdown(f"#### 🎯 Apply Now - {st.session_state.selected_endpoints[0]} - Click to Apply (Auto-Fills Your Data)")
+    st.markdown(f"#### 🎯 Apply Now - {st.session_state.selected_endpoints[0]} - Click to Apply (Auto-Fills)")
 else:
     st.markdown(f"#### 🎯 Apply Now - Select 1 exam in Step 2 first - Then Apply Button Will Appear")
 
@@ -1098,3 +1295,94 @@ if st.button("🔍 Predict Colleges - Cutoff Tracker", key="predict_cutoff"):
 
 st.markdown("---")
 st.markdown("""<div style="background:#0f172a;color:#cbd5e1;padding:10px;border-radius:8px;text-align:center;font-size:0.7rem;">🎓 UniSync - Option A Deadline Banner Clean | Step 2 Compact 4 Cols + Dates | Step 5 Choice Filling + Cutoff Helper | Step 6 Seat Tracker + Cutoff Predictor | All Steps 1-6 Restored | Login Perfect</div>""", unsafe_allow_html=True)
+# --- BOOKMARKLET - NO EXTENSION, NO DEVELOPER MODE - 1 DRAG SOLUTION ---
+def create_bookmarklet_js(vault_personal):
+    """Create bookmarklet JS with student data embedded - No extension needed"""
+    personal = vault_personal if isinstance(vault_personal, dict) else {}
+    if isinstance(vault_personal, dict) and "personal" in vault_personal:
+        personal = vault_personal.get("personal", {})
+    data = {
+        "fullName": personal.get("fullName", ""),
+        "fatherName": personal.get("fatherName", ""),
+        "motherName": personal.get("motherName", ""),
+        "mobile": personal.get("mobile", ""),
+        "email": personal.get("email", ""),
+        "dob": personal.get("dob", ""),
+        "aadhaar": personal.get("aadhaar", ""),
+        "address": personal.get("address", ""),
+        "category": personal.get("category", ""),
+    }
+    import json as json_lib
+    json_str = json_lib.dumps(data)
+    js_code = "javascript:(function(){var D=" + json_str + ";function setV(el,val){if(!val||!el)return false;try{var p=Object.getPrototypeOf(el);var d=Object.getOwnPropertyDescriptor(p,'value');if(d&&d.set)d.set.call(el,val);else el.value=val;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.style.background='#f0fdf4';el.style.border='2px solid #22c55e';return true;}catch(e){try{el.value=val;el.dispatchEvent(new Event('input',{bubbles:true}));return true;}catch(e2){return false;}}}var filled=0;document.querySelectorAll('input,textarea,select').forEach(function(el){var k=(el.name+' '+(el.id||'')+' '+(el.placeholder||'')).toLowerCase();if((k.includes('full name')||k.includes('candidate name')||(k.includes('name')&&!k.includes('father')))&&D.fullName){if(setV(el,D.fullName))filled++;}else if(k.includes('father')&&D.fatherName){if(setV(el,D.fatherName))filled++;}else if((k.includes('mobile')||k.includes('phone'))&&D.mobile){if(setV(el,D.mobile))filled++;}else if(k.includes('email')&&D.email){if(setV(el,D.email))filled++;}});var d=document.createElement('div');d.textContent='✅ UniSync: '+filled+' fields filled! (No extension needed)';d.style.cssText='position:fixed;top:12px;right:12px;background:#22c55e;color:white;padding:12px 16px;border-radius:8px;z-index:9999999;font-size:14px;font-weight:700;';document.body.appendChild(d);setTimeout(function(){d.remove();},4000);})();"
+    return js_code
+
+
+# Generate bookmarklet for current user
+bookmarklet_js = create_bookmarklet_js(st.session_state.vault_data if hasattr(st.session_state, 'vault_data') and isinstance(st.session_state.vault_data, dict) else {})
+
+st.markdown("""
+<div style="background:linear-gradient(135deg,#0f172a 0%,#1e40af 100%);color:white;padding:16px;border-radius:12px;margin:16px 0;">
+<div style="font-size:1.1rem;font-weight:800;">🚀 NEW - No Extension, No Developer Mode - 1-Second Fill!</div>
+<div style="font-size:0.8rem;color:#bbf7d0;margin-top:4px;">Student will NOT do developer mode - This is for them - Just drag & click</div>
+</div>
+""", unsafe_allow_html=True)
+
+col_book1, col_book2 = st.columns([1.2, 1.8])
+
+with col_book1:
+    st.markdown("""
+    <div style="background:#f0fdf4;border:2px solid #22c55e;border-radius:10px;padding:14px;text-align:center;">
+    <div style="font-size:2rem;">🔖</div>
+    <div style="font-size:0.85rem;font-weight:700;color:#15803d;margin:6px 0;">Option 1: Bookmarklet<br>(No Extension)</div>
+    <div style="font-size:0.7rem;color:#475569;">1 Drag → Click on exam site → Auto-fills<br>No install, No developer mode</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Create draggable bookmarklet link
+    st.markdown(f"""
+    <div style="text-align:center;margin:12px 0;">
+    <a href="{bookmarklet_js}" style="display:inline-block;background:#22c55e;color:white;padding:12px 20px;border-radius:8px;font-weight:800;font-size:0.9rem;text-decoration:none;box-shadow:0 4px 12px rgba(34,197,94,0.4);cursor:move;">
+    🔖 Drag Me to Bookmarks Bar - UniSync Fill
+    </a>
+    <div style="font-size:0.65rem;color:#64748b;margin-top:6px;">↑ Drag this button to your bookmarks bar ↑</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.code(bookmarklet_js[:150] + "... [Drag button above instead of copying]", language="javascript")
+
+with col_book2:
+    st.markdown("""
+    <div style="background:white;border:1px solid #e2e8f0;border-radius:10px;padding:12px;">
+    <div style="font-size:0.8rem;font-weight:700;color:#0f172a;">📱 How to use (10 seconds):</div>
+    <div style="font-size:0.7rem;color:#475569;margin-top:8px;line-height:1.6;">
+    <b>Step 1:</b> Show bookmarks bar: Press <b>Ctrl+Shift+B</b> (Chrome)<br>
+    <b>Step 2:</b> Drag <b>🔖 UniSync Fill</b> button to bookmarks bar<br>
+    <b>Step 3:</b> Open any exam site: <i>jeemain.nta.nic.in / reap2025.com / admissions.lnmiit.ac.in</i><br>
+    <b>Step 4:</b> Click <b>UniSync Fill</b> in bookmarks bar → Fields turn green & auto-fill!<br><br>
+    <span style="background:#fef2f2;color:#dc2626;padding:2px 6px;border-radius:4px;font-size:0.65rem;">No Developer Mode | No Load Unpacked | No Extension | Works on Mobile too (Add to bookmarks)</span>
+    </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("""
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px;margin-top:10px;">
+    <div style="font-size:0.7rem;font-weight:700;color:#1e40af;">💡 Why students will use this (not extension):</div>
+    <div style="font-size:0.65rem;color:#475569;margin-top:4px;">
+    • No developer mode ON/OFF - Direct drag<br>
+    • No Load unpacked - No ZIP extract<br>
+    • Works in 1 click on exam site - Itne me to wo particular site khol ke manual fill karne se fast hai!<br>
+    • Mobile pe bhi kaam karta hai - Bookmark me save karo, exam site pe click karo
+    </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown("---")
+st.markdown("""
+<div style="background:white;border:1px dashed #cbd5e1;border-radius:8px;padding:10px;text-align:center;">
+<div style="font-size:0.75rem;color:#64748b;"><b>Option 2 for Power Users:</b> Extension (1-Click with data pre-loaded) - If you want auto-fill on page load without clicking bookmark</div>
+</div>
+""", unsafe_allow_html=True)
+
+
+
