@@ -2,10 +2,10 @@
 
 # ==================== merged from unisync_vault.py ====================
 # Encrypted per-user vault (AES-256-GCM, per-user key derived from a master key).
-# Master key: env UNISYNC_MASTER_KEY = base64 of 32 random bytes. Never commit it.
-# Generate one: python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"
+# Master key: UNISYNC_MASTER_KEY in the environment or Streamlit secrets; base64 of 32 random bytes.
+# Generate one: py -c "import base64,secrets;print(base64.b64encode(secrets.token_bytes(32)).decode())"
 
-import os, json, base64, hashlib, shutil
+import os, json, base64, binascii, hashlib, shutil
 from datetime import datetime
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -17,10 +17,18 @@ DATA_DIR = os.environ.get("UNISYNC_DATA_DIR", "data")
 def _master():
     k = os.environ.get("UNISYNC_MASTER_KEY")
     if not k:
-        raise RuntimeError("Set UNISYNC_MASTER_KEY (base64, 32 bytes). See module docstring.")
-    key = base64.b64decode(k)
+        try:
+            k = st.secrets.get("UNISYNC_MASTER_KEY")
+        except FileNotFoundError:
+            k = None
+    if not k:
+        raise RuntimeError("UNISYNC_MASTER_KEY is not configured.")
+    try:
+        key = base64.b64decode(k, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise RuntimeError("UNISYNC_MASTER_KEY must be base64-encoded 32 random bytes.") from e
     if len(key) != 32:
-        raise RuntimeError("UNISYNC_MASTER_KEY must decode to 32 bytes.")
+        raise RuntimeError("UNISYNC_MASTER_KEY must be base64-encoded 32 random bytes.")
     return key
 
 
@@ -308,16 +316,19 @@ function fillForm(D) {
     ['fullName',   /(candidate.?name|full.?name|applicant.?name|student.?name|^name$)/, /(father|mother|guardian|user|college|school|board|institute)/],
     ['fatherName', /(father|f_name|fathername)/, /(occupation|mobile|phone|income)/],
     ['motherName', /(mother|m_name|mothername)/, /(occupation|mobile|phone|income)/],
+    ['roll_no',     /(roll.?no|roll.?number|registration.?no|registration.?number)/, null],
     ['mobile',     /(mobile|phone|contact.?no)/, /(parent|father|mother|guardian|alternate|emergency)/],
     ['email',      /(e-?mail)/, /(parent|father|mother|guardian|alternate)/],
     ['dob',        /(dob|birth)/, /(place|state|city|country)/],
     ['category',   /(category|caste)/, /(sub|certificate|number|no$)/],
+    ['score',      /(rank|score|air)/, /(category|cut.?off)/],
     ['class10_percentage', /(10th|tenth|class.?x\b|secondary).*(percent|marks|%)|(percent|marks|%).*(10th|tenth|secondary)/, null],
     ['class12_percentage', /(12th|twelfth|class.?xii|senior.?secondary).*(percent|marks|%)|(percent|marks|%).*(12th|twelfth)/, null],
   ];
   const VAL = { fullName: P.fullName, fatherName: P.fatherName, motherName: P.motherName, mobile: P.mobile,
-                email: P.email, dob: P.dob, category: P.category,
-                class10_percentage: A.class10_percentage, class12_percentage: A.class12_percentage };
+                email: P.email, dob: P.dob, category: P.category, roll_no: P.roll_no,
+                score: D.score, class10_percentage: A.class10_percentage,
+                class12_percentage: A.class12_percentage };
 
   function labelText(el) {
     let t = '';
@@ -397,7 +408,7 @@ def autofill_json(personal: dict, scores: dict) -> dict:
         "personal": {"fullName": personal.get("name", ""), "fatherName": personal.get("fatherName", ""),
                      "motherName": personal.get("motherName", ""), "mobile": personal.get("mobile", ""),
                      "email": personal.get("email", ""), "dob": personal.get("dob", ""),
-                     "category": personal.get("category", "")},
+                     "category": personal.get("category", ""), "roll_no": personal.get("roll_no", "")},
         "academic": {"class10_percentage": personal.get("class10_percentage", ""),
                      "class12_percentage": personal.get("class12_percentage", "")},
         "score": list(scores.values())[0] if scores else "",
@@ -445,6 +456,40 @@ def _pdf_text(data):
     except Exception as exc:
         raise RuntimeError(f"Could not read this PDF: {exc}") from exc
 
+def _marksheet_ocr_quality(text):
+    fields = parse_marksheet(text)
+    return sum(
+        field in fields
+        for field in ("name", "fatherName", "motherName", "roll_no", "dob", "percentage")
+    )
+
+def _combine_marksheet_ocr(attempts):
+    ranked = sorted(
+        attempts,
+        key=lambda attempt: (_marksheet_ocr_quality(attempt), len(attempt)),
+        reverse=True,
+    )
+    merged_fields = parse_marksheet(ranked[0]) if ranked else {}
+    for attempt in ranked[1:]:
+        for field, value in parse_marksheet(attempt).items():
+            if field not in merged_fields:
+                merged_fields[field] = value
+
+    labels = {
+        "name": "Student Name",
+        "fatherName": "Father's Name",
+        "motherName": "Mother's Name",
+        "roll_no": "Roll No",
+        "dob": "Date of Birth",
+        "percentage": "Percentage",
+    }
+    normalized_fields = [
+        f"{labels[field]}: {merged_fields[field][0]}"
+        for field in labels
+        if field in merged_fields
+    ]
+    return "\n".join([*normalized_fields, *(ranked[:1])])
+
 def _pdf_ocr(data):
     try:
         import pymupdf
@@ -463,7 +508,7 @@ def _pdf_ocr(data):
                         pytesseract.image_to_string(image, config=f"--oem 3 --psm {mode}")
                         for mode in (6, 11)
                     ]
-                    pages.append(max(attempts, key=len))
+                    pages.append(_combine_marksheet_ocr(attempts))
             return "\n".join(pages)
     except Exception as exc:
         raise RuntimeError(f"Could not OCR this PDF: {exc}") from exc
@@ -478,11 +523,15 @@ def _img_ocr(data):
     try:
         with Image.open(io.BytesIO(data)) as image:
             im = ImageOps.autocontrast(ImageOps.grayscale(ImageOps.exif_transpose(image)))
+            images = [im]
+            if max(im.size) <= 1600:
+                images.append(im.resize((im.width * 2, im.height * 2)))
             attempts = [
-                pytesseract.image_to_string(im, config=f"--oem 3 --psm {mode}")
+                pytesseract.image_to_string(candidate, config=f"--oem 3 --psm {mode}")
+                for candidate in images
                 for mode in (6, 11)
             ]
-            return max(attempts, key=len)
+            return _combine_marksheet_ocr(attempts)
     except Exception as exc:
         raise RuntimeError(f"Could not OCR this image: {exc}") from exc
 
@@ -513,14 +562,20 @@ def parse_marksheet(text: str):
     field_labels = (
         r"candidate(?:'?s)?\s+name", r"name\s+of\s+(?:the\s+)?candidate",
         r"student(?:'?s)?\s+name", r"name\s+of\s+(?:the\s+)?student",
-        r"applicant(?:'?s)?\s+name", r"full\s+name",
-        r"father(?:'?s)?\s+name", r"name\s+of\s+(?:the\s+)?father",
-        r"mother(?:'?s)?\s+name", r"name\s+of\s+(?:the\s+)?mother",
-        r"date\s+of\s+birth", r"birth\s+date", r"d\.?\s*o\.?\s*b\.?",
+        r"applicant(?:'?s)?\s+name", r"full\s+name", r"नाम",
+        r"father(?:['\u2019\u2018`\u00b4\ufffd]?\s*s)?[\s:./-]+name",
+        r"(?:father|guardian|parent)(?:['\u2019\u2018`\u00b4\ufffd]?\s*s)?"
+        r"\s*/\s*(?:father|guardian|parent)(?:['\u2019\u2018`\u00b4\ufffd]?\s*s)?[\s:.-]+name",
+        r"(?:father|guardian|parent)\s*/\s*(?:father|guardian|parent)\s+name",
+        r"name\s+of\s+(?:the\s+)?(?:father|guardian|parent)",
+        r"पिता\s*(?:का\s*)?नाम",
+        r"mother(?:['\u2019\u2018`\u00b4\ufffd]?\s*s)?[\s:.-]+name", r"name\s+of\s+(?:the\s+)?mother",
+        r"माता\s*(?:का\s*)?नाम",
+        r"date\s+of\s+birth", r"birth\s+date", r"d\.?\s*o\.?\s*b\.?", r"जन्म\s*(?:तिथि|दिनांक)",
         r"roll\s*(?:no\.?|number)", r"registration\s*(?:no\.?|number)",
         r"enrol(?:ment)?\s*(?:no\.?|number)",
         r"percentage|aggregate\s+marks|total\s+marks|marks\s+obtained|"
-        r"maximum\s+marks|grand\s+total|result\s+total",
+        r"maximum\s+marks|grand\s+total|result\s+total|प्रतिशत|प्राप्तांक|कुल\s+अंक",
     )
     next_label = r"(?:" + "|".join(field_labels) + r")"
 
@@ -528,7 +583,7 @@ def parse_marksheet(text: str):
         source = text if source is None else source
         label = r"(?:" + "|".join(labels) + r")"
         pattern = re.compile(
-            rf"(?im)(?:^|[|]|\s+)\s*{label}\s*"
+            rf"(?im)(?<!\w)\s*{label}\s*"
             rf"(?::|=|-)?\s*([^\r\n|]{{1,{max_length}}})"
         )
         for match in pattern.finditer(source):
@@ -541,7 +596,8 @@ def parse_marksheet(text: str):
             if value:
                 return value
         following_line = re.search(
-            rf"(?im)^\s*{label}\s*[:=\-]?\s*\r?\n\s*([^\r\n|]{{1,{max_length}}})",
+            rf"(?im){label}\s*[:=\-]?\s*\r?\n(?:[ \t]*\r?\n)*[ \t]*"
+            rf"([^\r\n|]{{1,{max_length}}})",
             source,
         )
         if following_line:
@@ -555,28 +611,73 @@ def parse_marksheet(text: str):
         if value:
             result[key] = (value, confidence)
 
-    name = labeled_value((
+    student_name_labels = (
         r"candidate(?:'?s)?\s+name", r"name\s+of\s+(?:the\s+)?candidate",
         r"student(?:'?s)?\s+name", r"name\s+of\s+(?:the\s+)?student",
         r"applicant(?:'?s)?\s+name", r"full\s+name",
-    ))
+        r"अभ्यर्थी\s*का\s*नाम", r"छात्र(?:ा)?\s*का\s*नाम",
+        r"विद्यार्थी\s*का\s*नाम",
+    )
+    name = labeled_value(student_name_labels)
     if not name:
         generic_name_text = re.sub(
-            r"(?i)(?:father'?s?|mother'?s?|school)\s+name|name\s+of\s+(?:the\s+)?(?:father|mother|school)",
-            "parent field",
+            r"(?i)(?:father|guardian|parent)(?:['\u2019\u2018`\u00b4\ufffd]?\s*s)?"
+            r"[\s:./-]+name|name\s+of\s+(?:the\s+)?(?:father|guardian|parent)"
+            r"|पिता\s*(?:का\s*)?नाम",
+            "",
             text,
         )
-        name = labeled_value((r"\bname\b",), source=generic_name_text)
-    put("name", name, 0.65)
-    put("fatherName", labeled_value((r"father(?:'?s)?\s+name", r"name\s+of\s+(?:the\s+)?father")))
-    put("motherName", labeled_value((r"mother(?:'?s)?\s+name", r"name\s+of\s+(?:the\s+)?mother")))
-    put("roll_no", labeled_value((
+        name = labeled_value((r"\bname\b", r"नाम"), source=generic_name_text)
+    if not name:
+        heading_words = {
+            "ALL", "INDIA", "CENTRAL", "BOARD", "SECONDARY", "SCHOOL",
+            "SENIOR", "CERTIFICATE", "EXAMINATION", "MARKS", "STATEMENT",
+            "RESULT", "SUBJECT", "CANDIDATE", "STUDENT", "NAME",
+        }
+        table_header = re.search(r"(?i)\b(?:subject|marks\s+obtained|theory|practical)\b", text)
+        name_section = text[:table_header.start()] if table_header else text
+        for line in name_section.splitlines():
+            tokens = line.strip(" \t:").split()
+            normalized_tokens = [token.strip(".,:;") for token in tokens]
+            if len(normalized_tokens) != 2:
+                continue
+            if any(not re.fullmatch(r"[A-Z]{2,}", token) for token in normalized_tokens):
+                continue
+            if any(token in heading_words for token in normalized_tokens):
+                continue
+            name = " ".join(normalized_tokens)
+            break
+    if name.casefold() not in {"लिखित", "written", "name", "student", "candidate"}:
+        put("name", name, 0.65)
+    put("fatherName", labeled_value((
+        r"(?:father|guardian|parent)(?:['\u2019\u2018`\u00b4\ufffd]?\s*s)?[\s:./-]+name",
+        r"(?:father|guardian|parent)(?:['\u2019\u2018`\u00b4\ufffd]?\s*s)?"
+        r"\s*/\s*(?:father|guardian|parent)(?:['\u2019\u2018`\u00b4\ufffd]?\s*s)?[\s:.-]+name",
+        r"(?:father|guardian|parent)\s*/\s*(?:father|guardian|parent)\s+name",
+        r"name\s+of\s+(?:the\s+)?(?:father|guardian|parent)",
+        r"पिता\s*(?:का\s*)?नाम",
+    )))
+    put("motherName", labeled_value((
+        r"mother(?:['\u2019\u2018`\u00b4\ufffd]?\s*s)?[\s:.-]+name",
+        r"name\s+of\s+(?:the\s+)?mother",
+        r"माता\s*(?:का\s*)?नाम",
+    )))
+    if (
+        result.get("name")
+        and result.get("fatherName")
+        and result["name"][0].casefold() == result["fatherName"][0].casefold()
+    ):
+        result.pop("name")
+    roll_number = labeled_value((
         r"roll\s*(?:no\.?|number)", r"registration\s*(?:no\.?|number)",
         r"enrol(?:ment)?\s*(?:no\.?|number)",
-    ), 40), 0.75)
+    ), 40).strip(" \t:=-./\\")
+    put("roll_no", roll_number, 0.75)
 
     # A DOB is accepted only when the date is explicitly attached to a birth label.
-    dob_value = labeled_value((r"date\s+of\s+birth", r"birth\s+date", r"D\.?O\.?B\.?"), 40)
+    dob_value = labeled_value((
+        r"date\s+of\s+birth", r"birth\s+date", r"D\.?O\.?B\.?", r"जन्म\s*(?:तिथि|दिनांक)",
+    ), 40)
     dob_match = re.search(
         r"\b(\d{1,2})[-/.](\d{1,2})[-/.]((?:19|20)\d{2})\b",
         dob_value,
@@ -651,8 +752,51 @@ def parse_marksheet(text: str):
             1.0,
         )
 
+    number_words = {
+        "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+        "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+        "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+        "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+        "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
+        "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+        "eighty": 80, "ninety": 90, "hundred": 100,
+    }
+
+    def score_from_words(phrase):
+        words = re.findall(r"[a-z]+", phrase.casefold())
+        if not words or any(word not in number_words and word != "and" for word in words):
+            return None
+        words = [word for word in words if word != "and"]
+        if "hundred" in words:
+            index = words.index("hundred")
+            hundreds = number_words[words[index - 1]] if index else 1
+            return hundreds * 100 + sum(number_words[word] for word in words[index + 1:])
+        if len(words) == 2 and number_words[words[0]] >= 20:
+            return number_words[words[0]] + number_words[words[1]]
+        return sum(number_words[word] for word in words)
+
+    word_scores = []
+    table_start = re.search(r"(?i)\b(?:subject|marks\s+obtained)\b", text)
+    if table_start:
+        table_text = text[table_start.start():]
+        table_end = re.search(r"(?i)\b(?:result|abbreviations|dated)\b", table_text)
+        if table_end:
+            table_text = table_text[:table_end.start()]
+        number_word_pattern = re.compile(
+            r"\b(?:(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+            r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+            r"eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+            r"eighty|ninety|hundred)(?:[\s-]+|$))+(?<![\s-])",
+            re.I,
+        )
+        for line in table_text.splitlines():
+            for match in number_word_pattern.finditer(line.strip()):
+                score = score_from_words(match.group().strip())
+                if score is not None and 0 <= score <= 100:
+                    word_scores.append(score)
+
     percentage_match = re.search(
-        r"(?i)(?:aggregate\s+)?(?:overall\s+)?(?:percentage|percent|marks\s*%)[^\d%]{0,30}"
+        r"(?i)(?:aggregate\s+)?(?:overall\s+)?(?:percentage|percent|marks\s*%|प्रतिशत)[^\d%]{0,30}"
         r"(\d{1,3}(?:\.\d{1,2})?)\s*%?",
         text,
     ) or re.search(r"\b(\d{1,3}(?:\.\d{1,2})?)\s*%", text)
@@ -661,7 +805,7 @@ def parse_marksheet(text: str):
     else:
         totals = re.search(
             r"(?i)(?:aggregate\s+marks?|total\s+marks?|grand\s+total|"
-            r"result\s+total|marks\s+obtained|marks\s+secured)"
+            r"result\s+total|marks\s+obtained|marks\s+secured|प्राप्तांक|कुल\s+अंक)"
             r"[^\d]{0,24}(\d{2,4})\s*(?:/|out\s+of|of)\s*(\d{2,4})",
             text,
         )
@@ -690,14 +834,18 @@ def parse_marksheet(text: str):
                     value = f"{obtained / maximum * 100:.2f}".rstrip("0").rstrip(".")
                     put("percentage", value, 0.55)
     if "percentage" not in result and len(subject_marks) >= 5:
-        best_five_percentages = sorted(
-            (
-                obtained / maximum * 100
-                for obtained, maximum in subject_marks.values()
-            ),
+        best_five_marks = sorted(
+            subject_marks.values(),
+            key=lambda marks: marks[0],
             reverse=True,
         )[:5]
-        value = f"{sum(best_five_percentages) / 5:.2f}".rstrip("0").rstrip(".")
+        obtained_total = sum(obtained for obtained, _ in best_five_marks)
+        maximum_total = sum(maximum for _, maximum in best_five_marks)
+        value = f"{obtained_total / maximum_total * 100:.2f}".rstrip("0").rstrip(".")
+        put("percentage", value, 0.5)
+    elif "percentage" not in result and len(word_scores) >= 5:
+        best_five_scores = sorted(word_scores, reverse=True)[:5]
+        value = f"{sum(best_five_scores) / 500 * 100:.2f}".rstrip("0").rstrip(".")
         put("percentage", value, 0.5)
     return result
 
@@ -707,15 +855,26 @@ import streamlit as st
 import json
 import os
 import secrets
+import hmac
+import sqlite3
 
 
 st.set_page_config(page_title="UniSync - One Stop Solution", page_icon="🎓", layout="wide", initial_sidebar_state="collapsed")
 
 DEV_MODE = os.environ.get("UNISYNC_DEV") == "1"
-VAULT_READY = bool(os.environ.get("UNISYNC_MASTER_KEY"))
+AUTH_DB = os.environ.get("UNISYNC_AUTH_DB", os.path.join(DATA_DIR, "accounts.sqlite3"))
+try:
+    _master()
+except RuntimeError as e:
+    VAULT_READY = False
+    VAULT_KEY_ERROR = str(e)
+else:
+    VAULT_READY = True
+    VAULT_KEY_ERROR = ""
 
 _defaults = {
     "logged_in": False, "user_email": "", "user_name": "",
+    "vault_identity": "",
     "vault_data": {"personal": {}, "docs": {}, "scores": {}, "credentials": {}},
     "selected_endpoints": [], "application_type": "", "gov_linked": False,
     "otp_sent": False, "otp_mobile": "", "selected_autofill": [],
@@ -728,20 +887,107 @@ for _k, _v in _defaults.items():
 def persist():
     """Save to the encrypted vault - only with consent and only if the vault key is configured."""
     if st.session_state.get("consent") and VAULT_READY:
-        save_user_data(st.session_state.user_email, st.session_state.vault_data,
+        save_user_data(st.session_state.get("vault_identity") or st.session_state.user_email,
+                       st.session_state.vault_data,
                        st.session_state.selected_endpoints, st.session_state.gov_linked)
 
 
-def finish_login(email, name):
+def finish_login(email, name, vault_identity=None):
     st.session_state.logged_in = True
     st.session_state.user_email = email
     st.session_state.user_name = name
-    saved = load_user_data(email) if VAULT_READY else None
+    identity = vault_identity or email
+    st.session_state.vault_identity = identity
+    saved = load_user_data(identity) if VAULT_READY else None
     if saved:
         st.session_state.vault_data = saved["vault_data"]
         st.session_state.selected_endpoints = saved.get("selected_endpoints", [])
         st.session_state.gov_linked = saved.get("gov_linked", False)
         st.session_state.consent = True
+
+
+def _normalize_account_email(email):
+    normalized = email.strip().casefold()
+    if (len(normalized) > 254 or normalized.count("@") != 1
+            or any(character.isspace() for character in normalized)):
+        return None
+    local, domain = normalized.rsplit("@", 1)
+    if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        return None
+    return normalized
+
+
+def _password_digest(password, salt):
+    return hashlib.scrypt(
+        password.encode("utf-8"), salt=salt, n=1 << 14, r=8, p=1,
+        dklen=64, maxmem=64 * 1024 * 1024,
+    )
+
+
+def _initialize_password_db():
+    os.makedirs(os.path.dirname(os.path.abspath(AUTH_DB)), exist_ok=True)
+    connection = sqlite3.connect(AUTH_DB, timeout=10)
+    try:
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS password_accounts (
+                email TEXT PRIMARY KEY,
+                salt BLOB NOT NULL,
+                password_hash BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+    finally:
+        connection.close()
+
+
+def register_password_account(email, password):
+    normalized = _normalize_account_email(email)
+    if not normalized:
+        return False, "Enter a valid email address."
+    if len(password) < 12:
+        return False, "Use a password with at least 12 characters."
+    if len(password) > 1024:
+        return False, "Password must be 1024 characters or fewer."
+
+    _initialize_password_db()
+    salt = secrets.token_bytes(16)
+    password_hash = _password_digest(password, salt)
+    connection = sqlite3.connect(AUTH_DB, timeout=10)
+    try:
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO password_accounts "
+            "(email, salt, password_hash, created_at) VALUES (?, ?, ?, ?)",
+            (normalized, salt, password_hash, datetime.now().isoformat()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    if cursor.rowcount == 0:
+        return False, "An account with that email already exists. Try logging in."
+    return True, normalized
+
+
+def authenticate_password_account(email, password):
+    normalized = _normalize_account_email(email)
+    if not normalized or not password or len(password) > 1024:
+        return None
+
+    _initialize_password_db()
+    connection = sqlite3.connect(AUTH_DB, timeout=10)
+    try:
+        account = connection.execute(
+            "SELECT salt, password_hash FROM password_accounts WHERE email = ?",
+            (normalized,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    salt = account[0] if account else b"\0" * 16
+    expected_hash = account[1] if account else b"\0" * 64
+    actual_hash = _password_digest(password, salt)
+    if account and hmac.compare_digest(actual_hash, expected_hash):
+        return normalized
+    return None
 
 
 # ---------------- SCHOLARSHIP DATA ----------------
@@ -918,19 +1164,67 @@ if not st.session_state.logged_in:
         <div style="padding:0 20px;">
         """, unsafe_allow_html=True)
 
-        email_input = st.text_input("Username or Email Address", placeholder="", key="std_email", label_visibility="visible")
-        pass_input = st.text_input("Password", placeholder="", type="password", key="std_pass", label_visibility="visible")
+        password_mode = st.radio(
+            "Password account",
+            ["Log in", "Create account"],
+            horizontal=True,
+            key="password_auth_mode",
+            label_visibility="collapsed",
+        )
+        email_input = st.text_input("Email address", key="std_email")
+        pass_input = st.text_input("Password", type="password", key="std_pass")
 
-        col_rem, col_log = st.columns([1.2, 0.8])
-        with col_rem:
-            st.checkbox("Remember Me", key="remember", value=False)
-        with col_log:
-            if st.button("Log In", use_container_width=True, type="primary", key="std_login"):
-                if DEV_MODE and email_input:
-                    finish_login(email_input.strip().lower(), "Student")   # dev-only demo login
-                    st.rerun()
+        if password_mode == "Create account":
+            confirm_password = st.text_input(
+                "Confirm password", type="password", key="std_pass_confirm"
+            )
+            st.caption(
+                "Passwords are stored as salted hashes. Use at least 12 characters. "
+                "Password recovery and email verification aren't available yet. "
+                "Password accounts have a separate profile from Google accounts, even "
+                "if they use the same email."
+            )
+            if st.button(
+                "Create account", use_container_width=True, type="primary",
+                key="std_register",
+            ):
+                if pass_input != confirm_password:
+                    st.error("Passwords do not match.")
                 else:
-                    st.error("Password login is not enabled. Use Google or Mobile OTP.")
+                    try:
+                        created, result = register_password_account(email_input, pass_input)
+                    except sqlite3.Error:
+                        print("Password account storage error: SQLite error")
+                        st.error("Account service is temporarily unavailable. Please try again.")
+                    else:
+                        if created:
+                            finish_login(
+                                result, "Student", vault_identity=f"password:{result}"
+                            )
+                            st.rerun()
+                        else:
+                            st.error(result)
+        elif st.button(
+            "Log in", use_container_width=True, type="primary", key="std_login"
+        ):
+            if DEV_MODE and email_input:
+                finish_login(email_input.strip().lower(), "Student")   # dev-only demo login
+                st.rerun()
+            else:
+                try:
+                    account_email = authenticate_password_account(email_input, pass_input)
+                except sqlite3.Error:
+                    print("Password account storage error: SQLite error")
+                    st.error("Account service is temporarily unavailable. Please try again.")
+                else:
+                    if account_email:
+                        finish_login(
+                            account_email, "Student",
+                            vault_identity=f"password:{account_email}",
+                        )
+                        st.rerun()
+                    else:
+                        st.error("Email or password is incorrect.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -984,7 +1278,14 @@ if not st.session_state.logged_in:
 
 # ---------------- HEADER ----------------
 if not VAULT_READY:
-    st.warning("Vault key not set (UNISYNC_MASTER_KEY) - your data will NOT be saved between sessions.")
+    if "not configured" in VAULT_KEY_ERROR:
+        st.warning(
+            "Vault key is not configured. Add UNISYNC_MASTER_KEY to "
+            ".streamlit/secrets.toml or your deployment's Streamlit secrets. "
+            "Data will not be saved between sessions."
+        )
+    else:
+        st.error(f"Vault key configuration error: {VAULT_KEY_ERROR}")
 
 col_h1, col_h2 = st.columns([3, 1])
 with col_h1:
@@ -1081,11 +1382,11 @@ with st.sidebar:
     st.markdown("**🔒 Your data & privacy**")
     st.checkbox("I consent to UniSync storing my data (encrypted) so I can autofill forms", key="consent")
     st.download_button("📥 Download my data",
-                       data=json.dumps((export_user_data(st.session_state.user_email) if VAULT_READY else None) or st.session_state.vault_data, indent=2, ensure_ascii=False),
+                       data=json.dumps((export_user_data(st.session_state.get("vault_identity") or st.session_state.user_email) if VAULT_READY else None) or st.session_state.vault_data, indent=2, ensure_ascii=False),
                        file_name="my-unisync-data.json", mime="application/json", use_container_width=True, key="dl_my_data")
     if st.button("🗑 Delete all my data", use_container_width=True, key="del_my_data"):
         if VAULT_READY:
-            delete_user_data(st.session_state.user_email)
+            delete_user_data(st.session_state.get("vault_identity") or st.session_state.user_email)
         st.session_state.clear()
         st.rerun()
 
@@ -1287,7 +1588,7 @@ st.markdown('## Step 3: Checklist / Documents')
 def store_file(key, data):
     """Encrypted file storage - only with consent and a configured vault key."""
     if st.session_state.get("consent") and VAULT_READY:
-        save_file(st.session_state.user_email, key, data)
+        save_file(st.session_state.get("vault_identity") or st.session_state.user_email, key, data)
 
 
 col_digi, _ = st.columns([1, 2])
@@ -1380,6 +1681,7 @@ for idx, (name, found, key, fmt) in enumerate(items):
                         else:
                             pdata = st.session_state.vault_data["personal"]
                             if "10th" in name or "12th" in name:
+                                is_10th_marksheet = "10th" in name
                                 try:
                                     text, how = extract_text(data, kind)
                                 except RuntimeError as exc:
@@ -1388,13 +1690,34 @@ for idx, (name, found, key, fmt) in enumerate(items):
                                 ext = parse_marksheet(text)
                                 if "OCR fallback unavailable" in how:
                                     st.warning(f"Could not run OCR, so only selectable PDF text was checked. {how}")
-                                if "_subject_marks" in ext:
-                                    st.caption(f"Subject marks found: {ext['_subject_marks'][0]}")
                                 if "percentage" in ext and ext["percentage"][1] == 0.5:
-                                    st.caption("Percentage is an estimate based on the best five detected subject mark ratios. Verify that this matches the admission form's rules.")
-                                if text.strip():
-                                    with st.expander("Review text read from the marksheet"):
-                                        st.text(text[:5000])
+                                    st.caption("Estimated from the best five subject totals. Verify that the admission authority uses this best-five policy.")
+                                review_fields = [
+                                    ("Student name", "name"),
+                                    ("Father's name", "fatherName"),
+                                    ("Roll number", "roll_no"),
+                                    ("Percentage", "percentage"),
+                                ]
+                                if is_10th_marksheet:
+                                    review_fields.insert(2, ("DOB", "dob"))
+                                extracted_details = [
+                                    f"{label}: {ext[field][0]}"
+                                    for label, field in review_fields
+                                    if field in ext and ext[field][0]
+                                ]
+                                extracted_field_labels = [
+                                    label
+                                    for label, field in review_fields
+                                    if field in ext and ext[field][0]
+                                ]
+                                if extracted_details:
+                                    with st.expander("Review relevant details from the marksheet"):
+                                        detail_columns = st.columns(2)
+                                        for detail_index, detail in enumerate(extracted_details):
+                                            with detail_columns[detail_index % 2]:
+                                                label, value = detail.split(": ", 1)
+                                                st.markdown(f"**{label}**")
+                                                st.write(value)
                                 signature_dates = set(filter(None, ext.get("_signature_dates", ("", 0))[0].split(",")))
                                 saved_dob = str(pdata.get("dob") or "")
                                 saved_dob_match = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})[-/.]((?:19|20)\d{2})", saved_dob)
@@ -1407,10 +1730,19 @@ for idx, (name, found, key, fmt) in enumerate(items):
                                     )
                                 )
                                 stale_signature_dob = normalized_saved_dob in signature_dates
-                                has_extracted_fields = any(not field.startswith("_") for field in ext)
+                                has_extracted_fields = bool(extracted_field_labels)
                                 form_id = hashlib.sha256(data).hexdigest()[:12]
                                 with st.form(f"confirm_{idx}_{key}_{form_id}"):
-                                    st.caption(f"Read via {how} - please verify every field." if has_extracted_fields else "No reliable labeled fields were found. Check the original document and enter details below; digital-signature dates are not treated as DOB.")
+                                    st.caption(
+                                        f"Read via {how}: extracted {', '.join(extracted_field_labels)}. "
+                                        "Verify the values; blank fields were not found in the marksheet."
+                                        if has_extracted_fields else
+                                        (
+                                            "No reliable form fields were found. Check the original document and enter details below; digital-signature dates are not treated as DOB."
+                                            if is_10th_marksheet else
+                                            "No reliable form fields were found. Check the original document and enter details below."
+                                        )
+                                    )
 
                                     def _fv(k):
                                         return ext.get(k, ("", 0))[0]
@@ -1418,7 +1750,6 @@ for idx, (name, found, key, fmt) in enumerate(items):
                                     def _lc(k):
                                         return k in ext and ext[k][1] < 0.8
 
-                                    pct = st.text_input("Percentage" + (" ⚠ verify" if _lc("percentage") else ""), value=_fv("percentage"))
                                     extracted_father = str(_fv("fatherName") or "").strip().casefold()
                                     saved_name_is_father = bool(
                                         extracted_father
@@ -1432,11 +1763,44 @@ for idx, (name, found, key, fmt) in enumerate(items):
                                         "" if saved_name_is_father or extracted_name_is_father
                                         else _fv("name") or pdata.get("name", "")
                                     )
-                                    nm = st.text_input("Name" + (" ⚠ verify" if _lc("name") else ""), value=name_default)
-                                    fn = st.text_input("Father's name" + (" ⚠ verify" if _lc("fatherName") else ""), value=_fv("fatherName") or pdata.get("fatherName", ""))
-                                    st.caption("If the marksheet has no percentage, it can be calculated from clearly identified aggregate marks or the best five detected subject marks when each has an explicit maximum. Otherwise, enter it manually.")
-                                    dob_default = _fv("dob") or ("" if stale_signature_dob else saved_dob)
-                                    dob = st.text_input("DOB (DD-MM-YYYY)" + (" ⚠ verify" if _lc("dob") else ""), value=dob_default)
+                                    student_col, father_col = st.columns(2)
+                                    with student_col:
+                                        nm = st.text_input(
+                                            "Student name" + (" ⚠ verify" if _lc("name") else ""),
+                                            value=name_default,
+                                            key=f"marksheet_{form_id}_name",
+                                        )
+                                    with father_col:
+                                        fn = st.text_input(
+                                            "Father's name" + (" ⚠ verify" if _lc("fatherName") else ""),
+                                            value=_fv("fatherName") or pdata.get("fatherName", ""),
+                                            key=f"marksheet_{form_id}_father_name",
+                                        )
+                                    st.caption("If the marksheet has no percentage, the best-five estimate is used when five subject totals are detected; otherwise, enter it manually and verify the board's policy.")
+                                    roll_col, secondary_col = st.columns(2)
+                                    with roll_col:
+                                        roll_no = st.text_input(
+                                            "Roll number" + (" ⚠ verify" if _lc("roll_no") else ""),
+                                            value=_fv("roll_no") or pdata.get("roll_no", ""),
+                                            key=f"marksheet_{form_id}_roll_no",
+                                        )
+                                    if is_10th_marksheet:
+                                        dob_default = _fv("dob") or ("" if stale_signature_dob else saved_dob)
+                                        with secondary_col:
+                                            dob = st.text_input(
+                                                "DOB (DD-MM-YYYY)" + (" ⚠ verify" if _lc("dob") else ""),
+                                                value=dob_default,
+                                                key=f"marksheet_{form_id}_dob",
+                                            )
+                                        percentage_col = st.container()
+                                    else:
+                                        percentage_col = secondary_col
+                                    with percentage_col:
+                                        pct = st.text_input(
+                                            "Percentage" + (" ⚠ verify" if _lc("percentage") else ""),
+                                            value=_fv("percentage"),
+                                            key=f"marksheet_{form_id}_percentage",
+                                        )
                                     if st.form_submit_button("Confirm & Save"):
                                         try:
                                             ok_pct = 0 < float(pct) <= 100
@@ -1450,9 +1814,11 @@ for idx, (name, found, key, fmt) in enumerate(items):
                                             elif saved_name_is_father or extracted_name_is_father:
                                                 pdata.pop("name", None)
                                             if fn: pdata["fatherName"] = fn
-                                            if dob: pdata["dob"] = dob
-                                            elif stale_signature_dob:
-                                                pdata.pop("dob", None)
+                                            if roll_no: pdata["roll_no"] = roll_no
+                                            if is_10th_marksheet:
+                                                if dob: pdata["dob"] = dob
+                                                elif stale_signature_dob:
+                                                    pdata.pop("dob", None)
                                             st.session_state.vault_data["docs"][name] = f.name
                                             store_file(key, data)
                                             persist()
@@ -1500,7 +1866,7 @@ for idx, (name, found, key, fmt) in enumerate(items):
                     if key == "score_entry":
                         st.session_state.vault_data["scores"] = {}
                     if VAULT_READY:
-                        delete_file(st.session_state.user_email, key)
+                        delete_file(st.session_state.get("vault_identity") or st.session_state.user_email, key)
                     persist()
                     st.rerun()
 
@@ -1619,7 +1985,7 @@ def get_autofill():
     personal = dict(st.session_state.vault_data.get("personal", {}))
     docs = st.session_state.vault_data.get("docs", {})
     scores = st.session_state.vault_data.get("scores", {})
-    if not personal.get("name") and not docs:
+    if not personal and not docs and not scores:
         return None
     em = st.session_state.user_email
     if em and not em.endswith(("@unisync.phone", "@unisync.guest")):
@@ -1650,18 +2016,112 @@ if data is None:
 else:
     pers = data["personal"]
     ds = data["docs_status"]
-    json_str = json.dumps(data["json"], indent=2, ensure_ascii=False)
     st.success(f"✅ Ready: {pers.get('name', 'Student')} | {pers.get('category', '')} | Score: {ds['score_val'] if ds['score'] else 'N/A'}")
     st.markdown(f"""<div style="background:#f0fdf4;border:1px solid #22c55e;border-radius:6px;padding:6px 10px;margin:6px 0;font-size:0.75rem;"><b>Docs:</b> 📸 Photo: {'✅' if ds['photo'] else '❌'} | ✍ Sign: {'✅' if ds['sign'] else '❌'} | 🎓 10th: {'✅' if ds['tenth'] else '❌'} | 📝 12th: {'✅' if ds['twelfth'] else '❌'} | 📊 Score: {'✅ ' + esc(ds['score_val']) if ds['score'] else '❌'} | 📄 Scorecard: {'✅' if ds['scorecard'] else '❌'}</div>""", unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.text_input("Name", value=pers.get("name", ""), disabled=True, key="p_name")
-    with c2:
-        st.text_input("Father", value=pers.get("fatherName", ""), disabled=True, key="p_father")
-    with c3:
-        st.text_input("Mobile", value=pers.get("mobile", ""), disabled=True, key="p_mob")
-    with c4:
-        st.text_input("Score", value=ds['score_val'] if ds['score'] else "N/A", disabled=True, key="p_score")
+    preview_identity = st.session_state.get("vault_identity") or st.session_state.user_email
+    preview_user_key = hashlib.sha256(preview_identity.encode()).hexdigest()[:10]
+
+    def preview_widget_key(field, value):
+        value_key = hashlib.sha256(str(value or "").encode()).hexdigest()[:10]
+        return f"step4_{preview_user_key}_{field}_{value_key}"
+
+    st.markdown("#### Review and edit your application details")
+    st.caption("These are the values included in the AutoFill preview. Correct them here before copying the data or opening an application.")
+    score_keys = list(st.session_state.vault_data.get("scores", {}))
+    score_key = score_keys[0] if score_keys else "Rank"
+    score_value = st.session_state.vault_data.get("scores", {}).get(score_key, "")
+    with st.form("step4_data_review"):
+        col1, col2 = st.columns(2)
+        with col1:
+            preview_name = st.text_input(
+                "Student name", value=str(pers.get("name") or ""),
+                key=preview_widget_key("name", pers.get("name")),
+            )
+            preview_father = st.text_input(
+                "Father's name", value=str(pers.get("fatherName") or ""),
+                key=preview_widget_key("father", pers.get("fatherName")),
+            )
+            preview_mother = st.text_input(
+                "Mother's name", value=str(pers.get("motherName") or ""),
+                key=preview_widget_key("mother", pers.get("motherName")),
+            )
+            preview_dob = st.text_input(
+                "Date of birth (DD-MM-YYYY)", value=str(pers.get("dob") or ""),
+                key=preview_widget_key("dob", pers.get("dob")),
+            )
+            preview_roll_no = st.text_input(
+                "Roll number", value=str(pers.get("roll_no") or ""),
+                key=preview_widget_key("roll_no", pers.get("roll_no")),
+            )
+        with col2:
+            preview_mobile = st.text_input(
+                "Mobile number", value=str(pers.get("mobile") or ""),
+                key=preview_widget_key("mobile", pers.get("mobile")),
+            )
+            preview_email = st.text_input(
+                "Email address", value=str(pers.get("email") or ""),
+                key=preview_widget_key("email", pers.get("email")),
+            )
+            preview_category = st.text_input(
+                "Category", value=str(pers.get("category") or ""),
+                key=preview_widget_key("category", pers.get("category")),
+            )
+            preview_class10 = st.text_input(
+                "Class 10 percentage", value=str(pers.get("class10_percentage") or ""),
+                key=preview_widget_key("class10_percentage", pers.get("class10_percentage")),
+            )
+            preview_class12 = st.text_input(
+                "Class 12 percentage", value=str(pers.get("class12_percentage") or ""),
+                key=preview_widget_key("class12_percentage", pers.get("class12_percentage")),
+            )
+            preview_score = st.text_input(
+                "Exam rank / score", value=str(score_value or ""),
+                key=preview_widget_key("score", score_value),
+            )
+        if st.form_submit_button("Save reviewed details", type="primary"):
+            invalid_percentages = []
+            for label, value in (
+                ("Class 10 percentage", preview_class10),
+                ("Class 12 percentage", preview_class12),
+            ):
+                if value.strip():
+                    try:
+                        percentage = float(value.strip().rstrip("%"))
+                    except ValueError:
+                        invalid_percentages.append(f"{label} must be a number from 0 to 100.")
+                    else:
+                        if not 0 <= percentage <= 100:
+                            invalid_percentages.append(f"{label} must be from 0 to 100.")
+            if invalid_percentages:
+                for message in invalid_percentages:
+                    st.error(message)
+            else:
+                reviewed_fields = {
+                    "name": preview_name,
+                    "fatherName": preview_father,
+                    "motherName": preview_mother,
+                    "dob": preview_dob,
+                    "roll_no": preview_roll_no,
+                    "mobile": preview_mobile,
+                    "email": preview_email,
+                    "category": preview_category,
+                    "class10_percentage": preview_class10,
+                    "class12_percentage": preview_class12,
+                }
+                for field, value in reviewed_fields.items():
+                    st.session_state.vault_data["personal"][field] = value.strip()
+                if preview_score.strip():
+                    st.session_state.vault_data["scores"][score_key] = preview_score.strip()
+                elif score_key in st.session_state.vault_data["scores"]:
+                    del st.session_state.vault_data["scores"][score_key]
+                persist()
+                st.success("Reviewed details updated. The AutoFill preview below now uses these values.")
+                st.rerun()
+
+    data = get_autofill()
+    pers = data["personal"] if data else {}
+    ds = data["docs_status"] if data else docs_status
+    json_str = json.dumps(data["json"] if data else {}, indent=2, ensure_ascii=False)
     docs_status = ds
 
 # ---------------- AUTOFILL ----------------
