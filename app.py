@@ -628,7 +628,7 @@ def _extension_app_origins(active_url=None):
         parsed = urlsplit(candidate)
         try:
             hostname = parsed.hostname
-            parsed.port
+            _port = parsed.port
         except ValueError as exc:
             raise RuntimeError("UNISYNC_EXTENSION_APP_ORIGINS contains an invalid origin.") from exc
         local_http = parsed.scheme == "http" and hostname in {"localhost", "127.0.0.1"}
@@ -649,17 +649,32 @@ def _extension_app_origins(active_url=None):
 
 APP_ORIGINS = _extension_app_origins()
 
-POPUP_HTML = """<!doctype html><html><body style="width:300px;padding:10px;font-family:sans-serif">
-<h3 style="margin:0 0 6px">UniSync AutoFill</h3>
-<textarea id="data" rows="7" style="width:100%" placeholder="Paste JSON from UniSync Step 4"></textarea>
-<div style="margin-top:6px"><button id="save">Save Data</button> <button id="fill">Fill Now</button></div>
-<div id="msg" style="margin-top:6px;font-size:12px"></div><script src="popup.js"></script></body></html>"""
+POPUP_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
+body{width:300px;padding:14px;font:14px Arial,sans-serif;color:#0f172a}
+h3{margin:0 0 8px}p{margin:0 0 12px;color:#475569;font-size:12px;line-height:1.5}
+button{width:100%;border:0;border-radius:6px;background:#1d4ed8;color:#fff;padding:10px;font-weight:600;cursor:pointer}
+button:disabled{background:#94a3b8;cursor:not-allowed}
+#msg{margin-top:10px;font-size:12px;line-height:1.4}
+</style></head><body>
+<h3>UniSync AutoFill</h3>
+<p id="status">Checking for your reviewed UniSync data...</p>
+<button id="fill" disabled>Fill this page</button>
+<div id="msg" role="status" aria-live="polite"></div>
+<p style="margin:10px 0 0">Fills supported, empty form fields only. Review all details; document uploads and form submission stay manual.</p>
+<script src="popup.js"></script></body></html>"""
 
 HANDOFF_JS = r"""
 const APP_ORIGINS = __APP_ORIGINS__;
 window.addEventListener('message', event => {
   if (!APP_ORIGINS.includes(event.origin) || event.source === window) return;
   const message = event.data;
+  if (message && message.type === 'unisync-ping') {
+    event.source.postMessage({
+      type: 'unisync-pong',
+      requestId: message.requestId
+    }, event.origin);
+    return;
+  }
   if (!message || message.type !== 'unisync-handoff') return;
   chrome.runtime.sendMessage({ type: 'unisync-save-reviewed-data', data: message.data }, response => {
     const error = chrome.runtime.lastError;
@@ -720,24 +735,62 @@ const ALLOWED = __ALLOWED__;
 const $ = id => document.getElementById(id);
 const msg = t => { $('msg').textContent = t; };
 
-chrome.storage.local.get(['unisync_data'], r => { if (r.unisync_data) $('data').value = r.unisync_data; });
+let savedData = null;
 
-$('save').onclick = () => {
-  try { JSON.parse($('data').value); } catch (e) { return msg('Invalid JSON'); }
-  chrome.storage.local.set({ unisync_data: $('data').value }, () => msg('Saved'));
-};
+chrome.storage.local.get(['unisync_data'], result => {
+  if (chrome.runtime.lastError) {
+    $('status').textContent = 'Could not read saved data: ' + chrome.runtime.lastError.message;
+    return;
+  }
+  if (!result.unisync_data) {
+    $('status').textContent = 'No reviewed data yet. Return to UniSync Step 4 and use Continue to send it here.';
+    return;
+  }
+  try {
+    savedData = JSON.parse(result.unisync_data);
+  } catch (error) {
+    $('status').textContent = 'Saved data is invalid. Return to UniSync and send it again.';
+    return;
+  }
+  const personal = savedData.personal || {};
+  const academic = savedData.academic || {};
+  const count = [...Object.values(personal), ...Object.values(academic), savedData.score]
+    .filter(value => typeof value === 'string' && value.trim()).length;
+  if (!count) {
+    savedData = null;
+    $('status').textContent = 'No reviewed form details were found. Add your details in UniSync Step 4 first.';
+    return;
+  }
+  $('status').textContent = count + ' reviewed detail(s) ready. Open a supported exam form and click below.';
+  $('fill').disabled = false;
+});
 
 $('fill').onclick = async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  let host = '';
-  try { host = new URL(tab.url).hostname; } catch (e) {}
-  if (!ALLOWED.some(d => host === d || host.endsWith('.' + d))) return msg('Site not supported: ' + host);
-  const { unisync_data } = await chrome.storage.local.get('unisync_data');
-  if (!unisync_data) return msg('Save data first');
-  const res = await chrome.scripting.executeScript({
-    target: { tabId: tab.id }, func: fillForm, args: [JSON.parse(unisync_data)]
-  });
-  msg((res[0].result || 0) + ' fields filled. Please review before submitting.');
+  $('fill').disabled = true;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.id) {
+      msg('Could not find the active browser tab.');
+      return;
+    }
+    let host = '';
+    try { host = new URL(tab.url).hostname; } catch (error) {}
+    if (!ALLOWED.some(domain => host === domain || host.endsWith('.' + domain))) {
+      msg('This site is not supported by UniSync AutoFill: ' + (host || 'unknown site'));
+      return;
+    }
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, func: fillForm, args: [savedData]
+    });
+    const count = results && results[0] ? results[0].result : 0;
+    msg(count
+      ? count + ' field(s) filled. Review them carefully before continuing.'
+      : 'No supported empty fields were recognized on this page. Complete the form manually.');
+  } catch (error) {
+    msg('Could not fill this page: ' + error.message);
+  } finally {
+    $('fill').disabled = !savedData;
+  }
 };
 
 // Runs inside the page only after the user clicks "Fill Now".
@@ -821,8 +874,8 @@ function fillForm(D) {
 def create_extension_zip() -> bytes:
     app_origins = _extension_app_origins(st.context.url)
     manifest = {
-        "manifest_version": 3, "name": "UniSync AutoFill", "version": "2.1",
-        "description": "Saves reviewed UniSync data and fills supported exam forms only when you click Fill Now.",
+        "manifest_version": 3, "name": "UniSync AutoFill", "version": "2.3",
+        "description": "Saves reviewed UniSync data and fills supported exam form fields only after you click.",
         "permissions": ["storage", "activeTab", "scripting"],
         "action": {"default_popup": "popup.html"},
         "background": {"service_worker": "background.js"},
@@ -2659,20 +2712,17 @@ AUTOFILL_OPTIONS = {
 
 st.markdown("""<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #1e40af;border-radius:6px;padding:8px 10px;margin-bottom:8px;"><h4 style="margin:0;color:#0f172a;font-size:0.9rem;">AutoFill Methods - Select by Dot</h4></div>""", unsafe_allow_html=True)
 
-for idx, (opt_key, opt_desc) in enumerate(AUTOFILL_OPTIONS.items()):
+for opt_key, opt_desc in AUTOFILL_OPTIONS.items():
     sel = opt_key in st.session_state.selected_autofill
-    dot = "🟢" if sel else "⚪"
-    checked = st.checkbox(f"{dot} {opt_desc}", value=sel, key=f"autofill_{opt_key}")
+    checked = st.checkbox(opt_desc, value=sel, key=f"autofill_{opt_key}")
     if checked and opt_key not in st.session_state.selected_autofill:
         st.session_state.selected_autofill.append(opt_key)
-        st.rerun()
     elif not checked and opt_key in st.session_state.selected_autofill:
         st.session_state.selected_autofill.remove(opt_key)
-        st.rerun()
 
     if opt_key in st.session_state.selected_autofill:
         st.download_button("📦 Download Extension", data=create_extension_zip(), file_name="unisync-extension.zip", mime="application/zip", use_container_width=True, type="primary", key=f"ext_{opt_key}")
-        st.caption("The extension ZIP includes this app's current origin. Install once from chrome://extensions → Developer Mode → Load unpacked. After downloading an update, replace the extension files and click Reload. UNISYNC_EXTENSION_APP_ORIGINS can include additional HTTPS origins. Fill Now works only on supported exam sites.")
+        st.caption("The extension ZIP includes this app's current origin. Install once from chrome://extensions → Developer Mode → Load unpacked. After downloading an update, replace the extension files and click Reload. UNISYNC_EXTENSION_APP_ORIGINS can include additional HTTPS origins. The one-click fill works only on supported exam sites.")
 
 if st.session_state.selected_autofill:
     st.success(f"✅ {len(st.session_state.selected_autofill)} AutoFill method selected")
@@ -2710,10 +2760,28 @@ if st.session_state.selected_autofill:
               const status = document.getElementById('unisync-handoff-status');
               let portalTab = null;
               let handoffTimer = null;
+              let pingRequestId = null;
 
               window.addEventListener('message', event => {{
-                if (event.source !== window.parent || !event.data ||
-                    event.data.type !== 'unisync-handoff-result') return;
+                if (event.source !== window.parent ||
+                    event.origin !== window.location.origin || !event.data) return;
+                if (event.data.type === 'unisync-pong' &&
+                    event.data.requestId === pingRequestId) {{
+                  window.clearTimeout(handoffTimer);
+                  pingRequestId = null;
+                  status.textContent = 'Extension detected. Sending reviewed data…';
+                  window.parent.postMessage({{
+                    type: 'unisync-handoff',
+                    data: reviewedData
+                  }}, window.location.origin);
+                  handoffTimer = window.setTimeout(() => {{
+                    if (portalTab) portalTab.close();
+                    status.textContent = 'The extension did not accept the data. Reload UniSync AutoFill and try again.';
+                    continueButton.disabled = false;
+                  }}, 8000);
+                  return;
+                }}
+                if (event.data.type !== 'unisync-handoff-result') return;
                 window.clearTimeout(handoffTimer);
                 if (!event.data.ok) {{
                   if (portalTab) portalTab.close();
@@ -2722,7 +2790,7 @@ if st.session_state.selected_autofill:
                   return;
                 }}
                 if (portalTab) portalTab.location.replace(examUrl);
-                status.textContent = 'Data sent. On the exam site, click UniSync → Fill Now, then review each field.';
+                status.textContent = 'Data sent. On the exam site, click the UniSync extension and Fill this page, then review each field.';
               }});
 
               continueButton.addEventListener('click', () => {{
@@ -2733,16 +2801,18 @@ if st.session_state.selected_autofill:
                   return;
                 }}
                 continueButton.disabled = true;
-                status.textContent = 'Sending reviewed data to the UniSync extension…';
+                status.textContent = 'Checking for UniSync AutoFill…';
+                pingRequestId = Date.now() + '-' + Math.random().toString(36).slice(2);
                 window.parent.postMessage({{
-                  type: 'unisync-handoff',
-                  data: reviewedData
-                }}, '*');
+                  type: 'unisync-ping',
+                  requestId: pingRequestId
+                }}, window.location.origin);
                 handoffTimer = window.setTimeout(() => {{
+                  pingRequestId = null;
                   if (portalTab) portalTab.close();
-                  status.textContent = 'Extension not detected. Install or reload UniSync AutoFill, then try again.';
+                  status.textContent = 'Pehle Extension Install karo - UniSync AutoFill ZIP download karke install/reload karo, phir try karo.';
                   continueButton.disabled = false;
-                }}, 8000);
+                }}, 2000);
               }});
             </script>
             """,
@@ -2751,7 +2821,7 @@ if st.session_state.selected_autofill:
             )
             st.caption(
                 "The reviewed details are saved to the UniSync extension and the selected official site opens. "
-                "On that site, click the extension and Fill Now. UniSync will not submit the form."
+                "On that site, click the extension and Fill this page. UniSync will not upload documents or submit the form."
             )
     elif not st.session_state.selected_endpoints:
         st.info("Select one exam in Step 2 to use the one-click handoff.")
